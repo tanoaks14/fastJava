@@ -1,0 +1,30 @@
+# FastJava startup configuration
+# Precedence: CLI args > this file > built-in defaults
+
+server.port=8080
+server.threads=16
+
+request.maxRequestSize=16384
+request.keepAliveTimeoutMillis=5000
+request.readTimeoutMillis=2000
+request.maxRequestLineBytes=4096
+request.maxHeaderBytes=8192
+request.maxBodyBytes=16384
+request.maxChunkSizeBytes=16384
+request.maxChunkCount=16384
+request.writeTimeoutMillis=30000
+request.maxMultipartBytes=16384
+request.maxMultipartPartBytes=16384
+request.multipartMemoryThresholdBytes=65536
+request.maxConcurrentConnections=4096
+request.keepAlivePressureQueueThreshold=800
+
+# HTTP/2 (disabled by default)
+http2.enabled=false
+http2.h2cEnabled=false
+http2.maxConcurrentStreams=100
+http2.initialWindowSize=65535
+http2.maxFrameSize=16384
+http2.headerTableSize=4096
+http2.maxHeaderListSize=32768
+http2.strictAlpn=false

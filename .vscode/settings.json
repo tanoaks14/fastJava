@@ -1,0 +1,7 @@
+{
+    "java.configuration.updateBuildConfiguration": "interactive",
+    "terminal.integrated.env.windows": {
+        "JAVA_HOME": "C:\\Program Files\\Microsoft\\jdk-25.0.2.10-hotspot",
+        "PATH": "C:\\Program Files\\Microsoft\\jdk-25.0.2.10-hotspot\\bin;D:\\dev\\apache-maven-3.9.5-bin\\apache-maven-3.9.5\\bin;${env:PATH}"
+    }
+}
