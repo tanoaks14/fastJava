@@ -5,7 +5,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 
 /**
  * Represents a parsed HTTP request with minimal overhead.
@@ -69,6 +72,42 @@ public class ParsedHttpRequest {
             boolean chunkedBody,
             InputStream liveBodyStream,
             boolean closeAfterResponse) {
+        this(
+                requestLine,
+                headers,
+                bodyBuffer,
+                bodyOffset,
+                bodyLength,
+                bytesConsumed,
+                chunkedBody,
+                liveBodyStream,
+                closeAfterResponse,
+                headers.get(HEADER_CONTENT_LENGTH),
+                headers.get(HEADER_CONTENT_TYPE),
+                headers.get(HEADER_TRANSFER_ENCODING),
+                headers.get(HEADER_HOST),
+                headers.get(HEADER_CONNECTION),
+                headers.get(HEADER_COOKIE),
+                headers.get(HEADER_ACCEPT_ENCODING));
+    }
+
+    public ParsedHttpRequest(
+            HttpRequestParser.RequestLine requestLine,
+            Map<String, String> headers,
+            byte[] bodyBuffer,
+            int bodyOffset,
+            int bodyLength,
+            int bytesConsumed,
+            boolean chunkedBody,
+            InputStream liveBodyStream,
+            boolean closeAfterResponse,
+            String headerContentLength,
+            String headerContentType,
+            String headerTransferEncoding,
+            String headerHost,
+            String headerConnection,
+            String headerCookie,
+            String headerAcceptEncoding) {
         this.requestLine = requestLine;
         this.headers = headers;
         this.bodyBuffer = bodyBuffer;
@@ -78,13 +117,13 @@ public class ParsedHttpRequest {
         this.chunkedBody = chunkedBody;
         this.liveBodyStream = liveBodyStream;
         this.closeAfterResponse = closeAfterResponse;
-        this.headerContentLength = headers.get(HEADER_CONTENT_LENGTH);
-        this.headerContentType = headers.get(HEADER_CONTENT_TYPE);
-        this.headerTransferEncoding = headers.get(HEADER_TRANSFER_ENCODING);
-        this.headerHost = headers.get(HEADER_HOST);
-        this.headerConnection = headers.get(HEADER_CONNECTION);
-        this.headerCookie = headers.get(HEADER_COOKIE);
-        this.headerAcceptEncoding = headers.get(HEADER_ACCEPT_ENCODING);
+        this.headerContentLength = headerContentLength;
+        this.headerContentType = headerContentType;
+        this.headerTransferEncoding = headerTransferEncoding;
+        this.headerHost = headerHost;
+        this.headerConnection = headerConnection;
+        this.headerCookie = headerCookie;
+        this.headerAcceptEncoding = headerAcceptEncoding;
     }
 
     public String getHeader(String name) {
@@ -103,7 +142,13 @@ public class ParsedHttpRequest {
         if (exactCaseValue != null) {
             return exactCaseValue;
         }
-        return headers.get(lowercaseAscii(name));
+
+        for (Entry<String, String> header : headers.entrySet()) {
+            if (asciiEqualsIgnoreCase(name, header.getKey())) {
+                return header.getValue();
+            }
+        }
+        return null;
     }
 
     private String commonHeaderValue(String name) {
@@ -159,6 +204,33 @@ public class ParsedHttpRequest {
 
     public String getMethod() {
         return requestLine.method;
+    }
+
+    public List<String> headerNames() {
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        if (headerContentLength != null) {
+            names.add("Content-Length");
+        }
+        if (headerContentType != null) {
+            names.add("Content-Type");
+        }
+        if (headerTransferEncoding != null) {
+            names.add("Transfer-Encoding");
+        }
+        if (headerHost != null) {
+            names.add("Host");
+        }
+        if (headerConnection != null) {
+            names.add("Connection");
+        }
+        if (headerCookie != null) {
+            names.add("Cookie");
+        }
+        if (headerAcceptEncoding != null) {
+            names.add("Accept-Encoding");
+        }
+        names.addAll(headers.keySet());
+        return List.copyOf(names);
     }
 
     public String getURI() {
@@ -229,18 +301,4 @@ public class ParsedHttpRequest {
         return closeAfterResponse;
     }
 
-    private static String lowercaseAscii(String value) {
-        int length = value.length();
-        char[] normalized = null;
-        for (int i = 0; i < length; i++) {
-            char ch = value.charAt(i);
-            if (ch >= 'A' && ch <= 'Z') {
-                if (normalized == null) {
-                    normalized = value.toCharArray();
-                }
-                normalized[i] = (char) (ch + ('a' - 'A'));
-            }
-        }
-        return normalized == null ? value : new String(normalized);
-    }
 }

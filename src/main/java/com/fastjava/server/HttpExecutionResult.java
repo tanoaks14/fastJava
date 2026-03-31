@@ -2,28 +2,85 @@ package com.fastjava.server;
 
 import com.fastjava.http.response.HttpResponseBuilder;
 import com.fastjava.sse.SseEmitter;
+import java.nio.ByteBuffer;
 
-public record HttpExecutionResult(byte[][] responseSegments, FileResponseBody fileBody, boolean keepAlive,
+public record HttpExecutionResult(ByteBuffer[] responseBuffers, FileResponseBody fileBody, boolean keepAlive,
 		int statusCode, long bytesSent, boolean sseStream, SseEmitter sseEmitter) {
 
+	public HttpExecutionResult(ByteBuffer[] responseBuffers, FileResponseBody fileBody, boolean keepAlive) {
+		this(responseBuffers, fileBody, keepAlive, 200, estimateBytesSent(responseBuffers, fileBody), false, null);
+	}
+
+	public HttpExecutionResult(ByteBuffer[] responseBuffers, boolean keepAlive) {
+		this(responseBuffers, null, keepAlive, 200, estimateBytesSent(responseBuffers, null), false, null);
+	}
+
 	public HttpExecutionResult(byte[][] responseSegments, FileResponseBody fileBody, boolean keepAlive) {
-		this(responseSegments, fileBody, keepAlive, 200, estimateBytesSent(responseSegments, fileBody), false, null);
+		this(wrapSegments(responseSegments), fileBody, keepAlive, 200,
+				estimateBytesSent(wrapSegments(responseSegments), fileBody),
+				false, null);
 	}
 
 	public HttpExecutionResult(byte[][] responseSegments, boolean keepAlive) {
-		this(responseSegments, null, keepAlive, 200, estimateBytesSent(responseSegments, null), false, null);
+		this(wrapSegments(responseSegments), null, keepAlive, 200,
+				estimateBytesSent(wrapSegments(responseSegments), null),
+				false, null);
+	}
+
+	public HttpExecutionResult(byte[][] responseSegments, FileResponseBody fileBody, boolean keepAlive,
+			int statusCode, long bytesSent, boolean sseStream, SseEmitter sseEmitter) {
+		this(wrapSegments(responseSegments), fileBody, keepAlive, statusCode, bytesSent, sseStream, sseEmitter);
 	}
 
 	public byte[] responseBytes() {
-		return HttpResponseBuilder.flattenSegments(responseSegments);
+		if (responseBuffers == null || responseBuffers.length == 0) {
+			return new byte[0];
+		}
+		int total = 0;
+		for (ByteBuffer buffer : responseBuffers) {
+			if (buffer != null) {
+				total += buffer.remaining();
+			}
+		}
+		byte[] merged = new byte[total];
+		int position = 0;
+		for (ByteBuffer buffer : responseBuffers) {
+			if (buffer == null || !buffer.hasRemaining()) {
+				continue;
+			}
+			ByteBuffer duplicate = buffer.duplicate();
+			int length = duplicate.remaining();
+			duplicate.get(merged, position, length);
+			position += length;
+		}
+		return merged;
 	}
 
-	private static long estimateBytesSent(byte[][] responseSegments, FileResponseBody fileBody) {
+	public byte[][] responseSegments() {
+		if (responseBuffers == null || responseBuffers.length == 0) {
+			return new byte[0][];
+		}
+		byte[][] segments = new byte[responseBuffers.length][];
+		for (int i = 0; i < responseBuffers.length; i++) {
+			ByteBuffer buffer = responseBuffers[i];
+			if (buffer == null) {
+				segments[i] = null;
+				continue;
+			}
+			ByteBuffer duplicate = buffer.duplicate();
+			byte[] bytes = new byte[duplicate.remaining()];
+			duplicate.get(bytes);
+			segments[i] = bytes;
+		}
+		return segments;
+	}
+
+	private static long estimateBytesSent(ByteBuffer[] responseBuffers, FileResponseBody fileBody) {
 		long total = 0;
-		if (responseSegments != null) {
-			for (byte[] segment : responseSegments) {
-				if (segment != null) {
-					total += segment.length;
+		if (responseBuffers != null) {
+			for (ByteBuffer buffer : responseBuffers) {
+				if (buffer != null) {
+					total += buffer.remaining();
 				}
 			}
 		}
@@ -31,5 +88,17 @@ public record HttpExecutionResult(byte[][] responseSegments, FileResponseBody fi
 			total += fileBody.length();
 		}
 		return total;
+	}
+
+	private static ByteBuffer[] wrapSegments(byte[][] responseSegments) {
+		if (responseSegments == null || responseSegments.length == 0) {
+			return new ByteBuffer[0];
+		}
+		ByteBuffer[] buffers = new ByteBuffer[responseSegments.length];
+		for (int i = 0; i < responseSegments.length; i++) {
+			byte[] segment = responseSegments[i];
+			buffers[i] = segment == null ? null : ByteBuffer.wrap(segment);
+		}
+		return buffers;
 	}
 }

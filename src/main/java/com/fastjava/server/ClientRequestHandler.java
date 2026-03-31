@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import java.io.*;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -238,9 +239,18 @@ public class ClientRequestHandler implements Runnable {
                 try (WriteTimeoutGuard writeTimeoutGuard = WriteTimeoutGuard.start(socket,
                         requestLimits.writeTimeoutMillis())) {
                     try (RequestTracing.SpanScope ignored = RequestTracing.startChildSpan("http.write")) {
-                        for (byte[] segment : responseResult.responseSegments()) {
-                            if (segment != null && segment.length > 0) {
-                                writeTimeoutGuard.execute(() -> output.write(segment));
+                        for (ByteBuffer segment : responseResult.responseBuffers()) {
+                            if (segment != null && segment.hasRemaining()) {
+                                ByteBuffer duplicate = segment.duplicate();
+                                int length = duplicate.remaining();
+                                if (duplicate.hasArray()) {
+                                    int offset = duplicate.arrayOffset() + duplicate.position();
+                                    writeTimeoutGuard.execute(() -> output.write(duplicate.array(), offset, length));
+                                } else {
+                                    byte[] copy = new byte[length];
+                                    duplicate.get(copy);
+                                    writeTimeoutGuard.execute(() -> output.write(copy));
+                                }
                             }
                         }
                         if (responseResult.fileBody() != null && responseResult.fileBody().length() > 0) {

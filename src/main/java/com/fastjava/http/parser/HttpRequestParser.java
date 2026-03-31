@@ -27,6 +27,15 @@ public class HttpRequestParser {
     private static final String HEADER_CONNECTION = "connection";
     private static final String HEADER_COOKIE = "cookie";
     private static final String HEADER_ACCEPT_ENCODING = "accept-encoding";
+    private static final byte[] HEADER_CONTENT_LENGTH_BYTES = HEADER_CONTENT_LENGTH.getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_CONTENT_TYPE_BYTES = HEADER_CONTENT_TYPE.getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_TRANSFER_ENCODING_BYTES = HEADER_TRANSFER_ENCODING
+            .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_HOST_BYTES = HEADER_HOST.getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_CONNECTION_BYTES = HEADER_CONNECTION.getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_COOKIE_BYTES = HEADER_COOKIE.getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_ACCEPT_ENCODING_BYTES = HEADER_ACCEPT_ENCODING
+            .getBytes(StandardCharsets.US_ASCII);
 
     /**
      * Parse HTTP request from raw bytes.
@@ -45,34 +54,27 @@ public class HttpRequestParser {
             return null;
         }
 
-        // Parse headers
-        Map<String, String> headers = new HashMap<>();
+        // Parse headers using a single forward pass over header lines.
+        HeaderAccumulator headers = new HeaderAccumulator();
         int headerStart = crlfPos + 2;
-        int blankLinePos = -1;
-
-        while (headerStart < length) {
-            int nextCRLF = SIMDByteScanner.findCRLF(buffer, headerStart, length);
-            if (nextCRLF == -1) {
-                return null; // Incomplete headers
-            }
-
-            if (nextCRLF == headerStart) {
-                // Blank line = end of headers
-                blankLinePos = headerStart;
-                break;
-            }
-
-            parseHeader(buffer, headerStart, nextCRLF, headers);
-            headerStart = nextCRLF + 2;
-        }
-
-        if (blankLinePos == -1) {
+        int headerEnd = SIMDByteScanner.findDoubleCRLF(buffer, headerStart, length);
+        if (headerEnd == -1) {
             return null;
         }
 
-        int bodyStart = blankLinePos + 2;
-        String transferEncoding = headers.get("transfer-encoding");
-        String contentLengthHeader = headers.get("content-length");
+        int cursor = headerStart;
+        while (cursor < headerEnd) {
+            int lineEnd = findNextCRLF(buffer, cursor, headerEnd + 2);
+            if (lineEnd == -1 || lineEnd > headerEnd) {
+                return null;
+            }
+            parseHeader(buffer, cursor, lineEnd, headers);
+            cursor = lineEnd + 2;
+        }
+
+        int bodyStart = headerEnd + 4;
+        String transferEncoding = headers.transferEncoding;
+        String contentLengthHeader = headers.contentLength;
 
         if (transferEncoding != null) {
             if (contentLengthHeader != null) {
@@ -89,12 +91,21 @@ public class HttpRequestParser {
 
             return new ParsedHttpRequest(
                     requestLine,
-                    headers,
+                    headers.toMap(),
                     buffer,
                     bodyStart,
                     chunkDecodeResult.encodedLength,
                     chunkDecodeResult.bytesConsumed,
-                    true);
+                    true,
+                    null,
+                    false,
+                    headers.contentLength,
+                    headers.contentType,
+                    headers.transferEncoding,
+                    headers.host,
+                    headers.connection,
+                    headers.cookie,
+                    headers.acceptEncoding);
         }
 
         int bodyLength = 0;
@@ -115,11 +126,21 @@ public class HttpRequestParser {
 
         return new ParsedHttpRequest(
                 requestLine,
-                headers,
+                headers.toMap(),
                 buffer,
                 bodyStart,
                 bodyLength,
-                bodyStart + bodyLength);
+                bodyStart + bodyLength,
+                false,
+                null,
+                false,
+                headers.contentLength,
+                headers.contentType,
+                headers.transferEncoding,
+                headers.host,
+                headers.connection,
+                headers.cookie,
+                headers.acceptEncoding);
     }
 
     private static ChunkDecodeResult decodeChunkedBody(byte[] buffer, int bodyStart, int length) {
@@ -131,19 +152,7 @@ public class HttpRequestParser {
                 return null;
             }
 
-            String rawSize = new String(buffer, cursor, sizeLineEnd - cursor, StandardCharsets.US_ASCII);
-            int extensionIndex = rawSize.indexOf(';');
-            String sizeToken = (extensionIndex >= 0 ? rawSize.substring(0, extensionIndex) : rawSize).trim();
-            if (sizeToken.isEmpty()) {
-                throw new IllegalArgumentException("Invalid chunk size");
-            }
-
-            final int chunkSize;
-            try {
-                chunkSize = Integer.parseInt(sizeToken, 16);
-            } catch (NumberFormatException exception) {
-                throw new IllegalArgumentException("Invalid chunk size", exception);
-            }
+            final int chunkSize = parseChunkSize(buffer, cursor, sizeLineEnd);
 
             if (chunkSize < 0) {
                 throw new IllegalArgumentException("Negative chunk size");
@@ -224,7 +233,7 @@ public class HttpRequestParser {
         return new String(buffer, start, len, StandardCharsets.US_ASCII);
     }
 
-    private static void parseHeader(byte[] buffer, int start, int end, Map<String, String> headers) {
+    private static void parseHeader(byte[] buffer, int start, int end, HeaderAccumulator headers) {
         if (start < end && (buffer[start] == ' ' || buffer[start] == '\t')) {
             throw new IllegalArgumentException("Obsolete folded headers are not supported");
         }
@@ -232,50 +241,220 @@ public class HttpRequestParser {
         if (colonPos == -1)
             return;
 
-        String name = canonicalHeaderName(normalizeHeaderName(buffer, start, colonPos));
+        String name = canonicalHeaderName(buffer, start, colonPos);
 
         // Trim and parse value
         int valueStart = SIMDByteScanner.trimStart(buffer, colonPos + 1, end);
         int valueEnd = SIMDByteScanner.trimEnd(buffer, valueStart, end);
         String value = new String(buffer, valueStart, valueEnd - valueStart, StandardCharsets.US_ASCII);
 
-        String existing = headers.get(name);
-        if (existing != null) {
-            if ("content-length".equals(name) || "transfer-encoding".equals(name)) {
-                throw new IllegalArgumentException("Duplicate header not allowed: " + name);
-            }
-        }
-
         headers.put(name, value);
     }
 
     private static String normalizeHeaderName(byte[] buffer, int start, int end) {
-        boolean hasUppercase = false;
-        for (int i = start; i < end; i++) {
-            byte current = buffer[i];
+        int length = end - start;
+        byte[] normalizedNameBytes = null;
+        for (int i = 0; i < length; i++) {
+            byte current = buffer[start + i];
             if (current >= 'A' && current <= 'Z') {
-                hasUppercase = true;
-                break;
+                if (normalizedNameBytes == null) {
+                    normalizedNameBytes = new byte[length];
+                    System.arraycopy(buffer, start, normalizedNameBytes, 0, length);
+                }
+                normalizedNameBytes[i] = (byte) (current + 32);
             }
         }
-        if (!hasUppercase) {
-            return new String(buffer, start, end - start, StandardCharsets.US_ASCII);
+        if (normalizedNameBytes == null) {
+            return new String(buffer, start, length, StandardCharsets.US_ASCII);
         }
-        byte[] normalizedNameBytes = SIMDByteScanner.toLowercaseAscii(buffer, start, end);
         return new String(normalizedNameBytes, StandardCharsets.US_ASCII);
     }
 
-    private static String canonicalHeaderName(String name) {
-        return switch (name) {
-            case HEADER_CONTENT_LENGTH -> HEADER_CONTENT_LENGTH;
-            case HEADER_CONTENT_TYPE -> HEADER_CONTENT_TYPE;
-            case HEADER_TRANSFER_ENCODING -> HEADER_TRANSFER_ENCODING;
-            case HEADER_HOST -> HEADER_HOST;
-            case HEADER_CONNECTION -> HEADER_CONNECTION;
-            case HEADER_COOKIE -> HEADER_COOKIE;
-            case HEADER_ACCEPT_ENCODING -> HEADER_ACCEPT_ENCODING;
-            default -> name;
-        };
+    private static String canonicalHeaderName(byte[] buffer, int start, int end) {
+        if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_CONTENT_LENGTH_BYTES)) {
+            return HEADER_CONTENT_LENGTH;
+        }
+        if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_CONTENT_TYPE_BYTES)) {
+            return HEADER_CONTENT_TYPE;
+        }
+        if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_TRANSFER_ENCODING_BYTES)) {
+            return HEADER_TRANSFER_ENCODING;
+        }
+        if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_HOST_BYTES)) {
+            return HEADER_HOST;
+        }
+        if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_CONNECTION_BYTES)) {
+            return HEADER_CONNECTION;
+        }
+        if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_COOKIE_BYTES)) {
+            return HEADER_COOKIE;
+        }
+        if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_ACCEPT_ENCODING_BYTES)) {
+            return HEADER_ACCEPT_ENCODING;
+        }
+        return normalizeHeaderName(buffer, start, end);
+    }
+
+    private static boolean equalsAsciiIgnoreCase(byte[] buffer, int start, int end, byte[] expectedLowercase) {
+        int length = end - start;
+        if (length != expectedLowercase.length) {
+            return false;
+        }
+        for (int i = 0; i < length; i++) {
+            byte value = buffer[start + i];
+            if (value >= 'A' && value <= 'Z') {
+                value = (byte) (value + 32);
+            }
+            if (value != expectedLowercase[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int parseChunkSize(byte[] buffer, int start, int endExclusive) {
+        int cursor = start;
+        while (cursor < endExclusive && (buffer[cursor] == ' ' || buffer[cursor] == '\t')) {
+            cursor++;
+        }
+
+        long value = 0;
+        boolean hasDigit = false;
+
+        while (cursor < endExclusive) {
+            byte current = buffer[cursor];
+            if (current == ';') {
+                break;
+            }
+            if (current == ' ' || current == '\t') {
+                while (cursor < endExclusive) {
+                    byte trailing = buffer[cursor];
+                    if (trailing == ';') {
+                        break;
+                    }
+                    if (trailing != ' ' && trailing != '\t') {
+                        throw new IllegalArgumentException("Invalid chunk size");
+                    }
+                    cursor++;
+                }
+                break;
+            }
+
+            int hex = hexValue(current);
+            if (hex < 0) {
+                throw new IllegalArgumentException("Invalid chunk size");
+            }
+            hasDigit = true;
+            value = (value << 4) + hex;
+            if (value > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("Chunk size overflow");
+            }
+            cursor++;
+        }
+
+        if (!hasDigit) {
+            throw new IllegalArgumentException("Invalid chunk size");
+        }
+        return (int) value;
+    }
+
+    private static int hexValue(byte value) {
+        if (value >= '0' && value <= '9') {
+            return value - '0';
+        }
+        if (value >= 'a' && value <= 'f') {
+            return value - 'a' + 10;
+        }
+        if (value >= 'A' && value <= 'F') {
+            return value - 'A' + 10;
+        }
+        return -1;
+    }
+
+    private static int findNextCRLF(byte[] buffer, int start, int limit) {
+        for (int i = start; i < limit - 1; i++) {
+            if (buffer[i] == '\r' && buffer[i + 1] == '\n') {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static final class HeaderAccumulator {
+        private String contentLength;
+        private String contentType;
+        private String transferEncoding;
+        private String host;
+        private String connection;
+        private String cookie;
+        private String acceptEncoding;
+        private String uncommonName;
+        private String uncommonValue;
+        private Map<String, String> uncommon;
+
+        private void put(String name, String value) {
+            if (HEADER_CONTENT_LENGTH.equals(name)) {
+                if (contentLength != null) {
+                    throw new IllegalArgumentException("Duplicate header not allowed: " + name);
+                }
+                contentLength = value;
+                return;
+            }
+            if (HEADER_TRANSFER_ENCODING.equals(name)) {
+                if (transferEncoding != null) {
+                    throw new IllegalArgumentException("Duplicate header not allowed: " + name);
+                }
+                transferEncoding = value;
+                return;
+            }
+            if (HEADER_CONTENT_TYPE.equals(name)) {
+                contentType = value;
+                return;
+            }
+            if (HEADER_HOST.equals(name)) {
+                host = value;
+                return;
+            }
+            if (HEADER_CONNECTION.equals(name)) {
+                connection = value;
+                return;
+            }
+            if (HEADER_COOKIE.equals(name)) {
+                cookie = value;
+                return;
+            }
+            if (HEADER_ACCEPT_ENCODING.equals(name)) {
+                acceptEncoding = value;
+                return;
+            }
+
+            if (uncommonName == null) {
+                uncommonName = name;
+                uncommonValue = value;
+                return;
+            }
+
+            if (uncommonName.equals(name)) {
+                uncommonValue = value;
+                return;
+            }
+
+            if (uncommon == null) {
+                uncommon = new HashMap<>(4);
+                uncommon.put(uncommonName, uncommonValue);
+            }
+            uncommon.put(name, value);
+        }
+
+        private Map<String, String> toMap() {
+            if (uncommon != null) {
+                return uncommon;
+            }
+            if (uncommonName == null) {
+                return Collections.emptyMap();
+            }
+            return Collections.singletonMap(uncommonName, uncommonValue);
+        }
     }
 
     private static void validateTrailerLine(byte[] buffer, int start, int end) {

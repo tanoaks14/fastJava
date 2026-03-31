@@ -1476,7 +1476,7 @@ public class FastJavaNioServer {
 
     private void queueHttp2Frame(SelectionKey key, NioConnection connection, byte[] frameBytes,
             boolean closeAfterWrite) {
-        queueResponse(key, connection, new byte[][] { frameBytes }, closeAfterWrite);
+        queueResponse(key, connection, new ByteBuffer[] { ByteBuffer.wrap(frameBytes) }, closeAfterWrite);
     }
 
     private void processBufferedRequest(SelectionKey key, NioConnection connection) throws IOException {
@@ -1950,7 +1950,7 @@ public class FastJavaNioServer {
             if (closeAfterWrite) {
                 connection.disableSseStreaming();
             }
-            queueResponse(key, connection, new byte[][] { payload }, closeAfterWrite);
+            queueResponse(key, connection, new ByteBuffer[] { ByteBuffer.wrap(payload) }, closeAfterWrite);
         }));
     }
 
@@ -1964,16 +1964,13 @@ public class FastJavaNioServer {
 
             NioConnection connection = (NioConnection) key.attachment();
             connection.markResponseReady();
-            connection.enqueueCompletedResponse(
-                    completion.sequence(),
-                    completion.executionResult(),
-                    completion.closeAfterWrite());
+            connection.enqueueCompletedResponse(completion);
             drainCompletedResponsesInOrder(key, connection);
         }
     }
 
     private void drainCompletedResponsesInOrder(SelectionKey key, NioConnection connection) {
-        NioQueuedResponse readyResponse;
+        NioCompletion readyResponse;
         while ((readyResponse = connection.pollNextOrderedResponse()) != null) {
             NioSseEmitter sseEmitter = null;
             if (readyResponse.executionResult().sseStream()) {
@@ -2001,10 +1998,10 @@ public class FastJavaNioServer {
 
     private void queueResponse(SelectionKey key, NioConnection connection, byte[] responseBytes,
             boolean closeAfterWrite) {
-        queueResponse(key, connection, new byte[][] { responseBytes }, closeAfterWrite);
+        queueResponse(key, connection, new ByteBuffer[] { ByteBuffer.wrap(responseBytes) }, closeAfterWrite);
     }
 
-    private void queueResponse(SelectionKey key, NioConnection connection, byte[][] responseSegments,
+    private void queueResponse(SelectionKey key, NioConnection connection, ByteBuffer[] responseSegments,
             boolean closeAfterWrite) {
         connection.prepareWrite(responseSegments, null, closeAfterWrite);
         key.interestOps(SelectionKey.OP_WRITE);
@@ -2013,7 +2010,7 @@ public class FastJavaNioServer {
 
     private void queueResponse(SelectionKey key, NioConnection connection, HttpExecutionResult executionResult,
             boolean closeAfterWrite) {
-        connection.prepareWrite(executionResult.responseSegments(), executionResult.fileBody(), closeAfterWrite);
+        connection.prepareWrite(executionResult.responseBuffers(), executionResult.fileBody(), closeAfterWrite);
         key.interestOps(SelectionKey.OP_WRITE);
         selector.wakeup();
     }
@@ -2090,15 +2087,16 @@ public class FastJavaNioServer {
         }
 
         private final SocketChannel channel;
+        private final RequestLimits requestLimits;
         private final TlsChannelHandler tlsHandler;
         private ProtocolMode protocolMode;
         private final byte[] buffer;
         private final ByteBuffer readView;
-        private final Deque<ByteBuffer> pendingWrites;
-        private final ByteBuffer[] gatherWriteBatch;
-        private final ByteBuffer[] gatherWriteOriginals;
-        private final int[] gatherWriteAllowedLengths;
-        private final Map<Long, NioQueuedResponse> completedResponses;
+        private Deque<ByteBuffer> pendingWrites;
+        private ByteBuffer[] gatherWriteBatch;
+        private ByteBuffer[] gatherWriteOriginals;
+        private int[] gatherWriteAllowedLengths;
+        private Map<Long, NioCompletion> completedResponses;
         private int bufferedBytes;
         private int inFlightRequests;
         private long nextRequestSequence;
@@ -2125,7 +2123,7 @@ public class FastJavaNioServer {
         private boolean http2InitialSettingsSent;
         private boolean peerSettingsReceived;
         private int lastHttp2StreamId;
-        private final Map<Integer, Http2StreamState> http2Streams;
+        private Map<Integer, Http2StreamState> http2Streams;
         private int inFlightHttp2Requests;
         private Integer pendingContinuationStreamId;
         private int highestClientStreamId;
@@ -2133,10 +2131,10 @@ public class FastJavaNioServer {
         private int connectionSendWindow;
         private int peerInitialStreamWindowSize;
         private int peerMaxFrameSize;
-        private final HpackCodec hpackCodec;
-        private final Map<Integer, Deque<Http2QueuedData>> queuedHttp2DataByStream;
-        private final Deque<Integer> queuedHttp2StreamOrder;
-        private final Set<Integer> queuedHttp2StreamSet;
+        private HpackCodec hpackCodec;
+        private Map<Integer, Deque<Http2QueuedData>> queuedHttp2DataByStream;
+        private Deque<Integer> queuedHttp2StreamOrder;
+        private Set<Integer> queuedHttp2StreamSet;
         private boolean pendingH2cUpgrade;
         private byte[] pendingH2cUpgradeSettings;
 
@@ -2147,15 +2145,16 @@ public class FastJavaNioServer {
         private NioConnection(SocketChannel channel, RequestLimits requestLimits,
                 TlsChannelHandler tlsHandler, ProtocolMode protocolMode) throws IOException {
             this.channel = channel;
+            this.requestLimits = requestLimits;
             this.tlsHandler = tlsHandler;
             this.protocolMode = protocolMode;
             this.buffer = new byte[requestLimits.maxRequestSize()];
             this.readView = ByteBuffer.wrap(buffer);
-            this.pendingWrites = new ArrayDeque<>();
-            this.gatherWriteBatch = new ByteBuffer[GATHER_WRITE_BATCH_SIZE];
-            this.gatherWriteOriginals = new ByteBuffer[GATHER_WRITE_BATCH_SIZE];
-            this.gatherWriteAllowedLengths = new int[GATHER_WRITE_BATCH_SIZE];
-            this.completedResponses = new TreeMap<>();
+            this.pendingWrites = null;
+            this.gatherWriteBatch = null;
+            this.gatherWriteOriginals = null;
+            this.gatherWriteAllowedLengths = null;
+            this.completedResponses = null;
             this.state = State.READING;
             this.lastActivityTimeMillis = System.currentTimeMillis();
             this.writeStartedAtMillis = 0;
@@ -2174,7 +2173,7 @@ public class FastJavaNioServer {
             this.http2InitialSettingsSent = false;
             this.peerSettingsReceived = false;
             this.lastHttp2StreamId = 0;
-            this.http2Streams = new HashMap<>();
+            this.http2Streams = null;
             this.inFlightHttp2Requests = 0;
             this.pendingContinuationStreamId = null;
             this.highestClientStreamId = 0;
@@ -2182,10 +2181,10 @@ public class FastJavaNioServer {
             this.connectionSendWindow = HTTP2_DEFAULT_INITIAL_WINDOW_SIZE;
             this.peerInitialStreamWindowSize = HTTP2_DEFAULT_INITIAL_WINDOW_SIZE;
             this.peerMaxFrameSize = 16_384;
-            this.hpackCodec = new HpackCodec(requestLimits.maxHeaderBytes(), 4096);
-            this.queuedHttp2DataByStream = new HashMap<>();
-            this.queuedHttp2StreamOrder = new ArrayDeque<>();
-            this.queuedHttp2StreamSet = new HashSet<>();
+            this.hpackCodec = null;
+            this.queuedHttp2DataByStream = null;
+            this.queuedHttp2StreamOrder = null;
+            this.queuedHttp2StreamSet = null;
             this.pendingH2cUpgrade = false;
             this.pendingH2cUpgradeSettings = null;
         }
@@ -2196,6 +2195,49 @@ public class FastJavaNioServer {
 
         private void setProtocolMode(ProtocolMode protocolMode) {
             this.protocolMode = protocolMode;
+            if (protocolMode == ProtocolMode.HTTP2) {
+                ensureHttp2State();
+            }
+        }
+
+        private void ensureHttp2State() {
+            if (http2Streams == null) {
+                http2Streams = new HashMap<>();
+            }
+            if (hpackCodec == null) {
+                hpackCodec = new HpackCodec(requestLimits.maxHeaderBytes(), 4096);
+            }
+            if (queuedHttp2DataByStream == null) {
+                queuedHttp2DataByStream = new HashMap<>();
+            }
+            if (queuedHttp2StreamOrder == null) {
+                queuedHttp2StreamOrder = new ArrayDeque<>();
+            }
+            if (queuedHttp2StreamSet == null) {
+                queuedHttp2StreamSet = new HashSet<>();
+            }
+        }
+
+        private Map<Long, NioCompletion> completedResponses() {
+            if (completedResponses == null) {
+                completedResponses = new TreeMap<>();
+            }
+            return completedResponses;
+        }
+
+        private Deque<ByteBuffer> pendingWrites() {
+            if (pendingWrites == null) {
+                pendingWrites = new ArrayDeque<>();
+            }
+            return pendingWrites;
+        }
+
+        private void ensureGatherWriteScratch() {
+            if (gatherWriteBatch == null) {
+                gatherWriteBatch = new ByteBuffer[GATHER_WRITE_BATCH_SIZE];
+                gatherWriteOriginals = new ByteBuffer[GATHER_WRITE_BATCH_SIZE];
+                gatherWriteAllowedLengths = new int[GATHER_WRITE_BATCH_SIZE];
+            }
         }
 
         private boolean http2PrefaceReceived() {
@@ -2254,10 +2296,12 @@ public class FastJavaNioServer {
         }
 
         private HpackCodec hpackCodec() {
+            ensureHttp2State();
             return hpackCodec;
         }
 
         private Http2StreamState getOrCreateHttp2Stream(int streamId) {
+            ensureHttp2State();
             Http2StreamState stream = http2Streams.computeIfAbsent(
                     streamId,
                     ignored -> new Http2StreamState(streamId, peerInitialStreamWindowSize));
@@ -2271,20 +2315,35 @@ public class FastJavaNioServer {
         }
 
         private Http2StreamState http2Stream(int streamId) {
+            if (http2Streams == null) {
+                return null;
+            }
             return http2Streams.get(streamId);
         }
 
         private void removeHttp2Stream(int streamId) {
+            if (http2Streams == null) {
+                return;
+            }
             http2Streams.remove(streamId);
-            queuedHttp2DataByStream.remove(streamId);
-            queuedHttp2StreamSet.remove(streamId);
-            queuedHttp2StreamOrder.removeIf(id -> id == streamId);
+            if (queuedHttp2DataByStream != null) {
+                queuedHttp2DataByStream.remove(streamId);
+            }
+            if (queuedHttp2StreamSet != null) {
+                queuedHttp2StreamSet.remove(streamId);
+            }
+            if (queuedHttp2StreamOrder != null) {
+                queuedHttp2StreamOrder.removeIf(id -> id == streamId);
+            }
             if (pendingContinuationStreamId != null && pendingContinuationStreamId == streamId) {
                 pendingContinuationStreamId = null;
             }
         }
 
         private int http2ActiveStreams() {
+            if (http2Streams == null) {
+                return 0;
+            }
             return http2Streams.size();
         }
 
@@ -2353,6 +2412,9 @@ public class FastJavaNioServer {
         private void updatePeerInitialStreamWindowSize(int newSize) {
             int delta = newSize - peerInitialStreamWindowSize;
             peerInitialStreamWindowSize = newSize;
+            if (http2Streams == null) {
+                return;
+            }
             for (Http2StreamState stream : http2Streams.values()) {
                 stream.adjustSendWindow(delta);
             }
@@ -2363,6 +2425,7 @@ public class FastJavaNioServer {
         }
 
         private void enqueueHttp2DataChunk(int streamId, byte[] payload, int flags) {
+            ensureHttp2State();
             Deque<Http2QueuedData> queue = queuedHttp2DataByStream.computeIfAbsent(streamId,
                     ignored -> new ArrayDeque<>());
             int offset = 0;
@@ -2383,6 +2446,9 @@ public class FastJavaNioServer {
         }
 
         private Http2QueuedData pollNextQueuedHttp2DataFrame() {
+            if (queuedHttp2DataByStream == null || queuedHttp2StreamOrder == null || queuedHttp2StreamSet == null) {
+                return null;
+            }
             int streams = queuedHttp2StreamOrder.size();
             for (int i = 0; i < streams; i++) {
                 Integer streamId = queuedHttp2StreamOrder.pollFirst();
@@ -2408,6 +2474,7 @@ public class FastJavaNioServer {
         }
 
         private void requeueHttp2DataFrame(Http2QueuedData frame) {
+            ensureHttp2State();
             Deque<Http2QueuedData> queue = queuedHttp2DataByStream.computeIfAbsent(frame.streamId(),
                     ignored -> new ArrayDeque<>());
             queue.addFirst(frame);
@@ -2436,7 +2503,8 @@ public class FastJavaNioServer {
             int remainingBudget = Math.max(1, maxWriteBytesPerOperation);
             int totalWritten = 0;
 
-            if (remainingBudget > 0 && tlsHandler == null && pendingWrites.size() > 1) {
+            Deque<ByteBuffer> writes = pendingWrites;
+            if (remainingBudget > 0 && tlsHandler == null && writes != null && writes.size() > 1) {
                 int gathered = writePendingBuffersGathered(remainingBudget);
                 if (gathered > 0) {
                     remainingBudget -= gathered;
@@ -2444,8 +2512,8 @@ public class FastJavaNioServer {
                 }
             }
 
-            while (remainingBudget > 0 && !pendingWrites.isEmpty()) {
-                ByteBuffer current = pendingWrites.peekFirst();
+            while (remainingBudget > 0 && writes != null && !writes.isEmpty()) {
+                ByteBuffer current = writes.peekFirst();
                 int allowed = Math.min(remainingBudget, current.remaining());
                 int bytesWritten;
                 if (tlsHandler != null) {
@@ -2475,7 +2543,7 @@ public class FastJavaNioServer {
                 remainingBudget -= bytesWritten;
                 totalWritten += bytesWritten;
                 if (!current.hasRemaining()) {
-                    pendingWrites.removeFirst();
+                    writes.removeFirst();
                 }
             }
 
@@ -2516,9 +2584,15 @@ public class FastJavaNioServer {
         }
 
         private int writePendingBuffersGathered(int writeBudget) throws IOException {
+            Deque<ByteBuffer> writes = pendingWrites;
+            if (writes == null || writes.size() <= 1) {
+                return 0;
+            }
+            ensureGatherWriteScratch();
+
             int count = 0;
             int remainingBudget = writeBudget;
-            for (ByteBuffer pendingWrite : pendingWrites) {
+            for (ByteBuffer pendingWrite : writes) {
                 if (count == GATHER_WRITE_BATCH_SIZE || remainingBudget <= 0) {
                     break;
                 }
@@ -2559,24 +2633,24 @@ public class FastJavaNioServer {
                 gatherWriteAllowedLengths[i] = 0;
             }
 
-            while (!pendingWrites.isEmpty() && !pendingWrites.peekFirst().hasRemaining()) {
-                pendingWrites.removeFirst();
+            while (!writes.isEmpty() && !writes.peekFirst().hasRemaining()) {
+                writes.removeFirst();
             }
             return written;
         }
 
-        private void prepareWrite(byte[][] responseSegments, FileResponseBody fileBody, boolean closeAfterWrite) {
+        private void prepareWrite(ByteBuffer[] responseSegments, FileResponseBody fileBody, boolean closeAfterWrite) {
             if (state != State.RESPONSE_READY && state != State.WRITING && state != State.READING
                     && state != State.EXECUTING
                     && state != State.IDLE) {
                 throw new IllegalStateException("Cannot queue response while in state " + state);
             }
             if (fileBody == null && tlsHandler != null && shouldCoalesceSmallSegments(responseSegments)) {
-                pendingWrites.addLast(ByteBuffer.wrap(coalesceSegments(responseSegments)));
+                pendingWrites().addLast(ByteBuffer.wrap(coalesceSegments(responseSegments)));
             } else {
-                for (byte[] responseSegment : responseSegments) {
-                    if (responseSegment != null && responseSegment.length > 0) {
-                        pendingWrites.addLast(ByteBuffer.wrap(responseSegment));
+                for (ByteBuffer responseSegment : responseSegments) {
+                    if (responseSegment != null && responseSegment.hasRemaining()) {
+                        pendingWrites().addLast(responseSegment.duplicate());
                     }
                 }
             }
@@ -2600,15 +2674,15 @@ public class FastJavaNioServer {
             }
         }
 
-        private boolean shouldCoalesceSmallSegments(byte[][] responseSegments) {
+        private boolean shouldCoalesceSmallSegments(ByteBuffer[] responseSegments) {
             int nonEmptySegments = 0;
             int totalBytes = 0;
-            for (byte[] segment : responseSegments) {
-                if (segment == null || segment.length == 0) {
+            for (ByteBuffer segment : responseSegments) {
+                if (segment == null || !segment.hasRemaining()) {
                     continue;
                 }
                 nonEmptySegments++;
-                totalBytes += segment.length;
+                totalBytes += segment.remaining();
                 if (nonEmptySegments > 1 && totalBytes > SMALL_RESPONSE_COALESCE_BYTES) {
                     return false;
                 }
@@ -2616,21 +2690,23 @@ public class FastJavaNioServer {
             return nonEmptySegments > 1 && totalBytes > 0;
         }
 
-        private byte[] coalesceSegments(byte[][] responseSegments) {
+        private byte[] coalesceSegments(ByteBuffer[] responseSegments) {
             int totalBytes = 0;
-            for (byte[] segment : responseSegments) {
+            for (ByteBuffer segment : responseSegments) {
                 if (segment != null) {
-                    totalBytes += segment.length;
+                    totalBytes += segment.remaining();
                 }
             }
             byte[] merged = new byte[totalBytes];
             int position = 0;
-            for (byte[] segment : responseSegments) {
-                if (segment == null || segment.length == 0) {
+            for (ByteBuffer segment : responseSegments) {
+                if (segment == null || !segment.hasRemaining()) {
                     continue;
                 }
-                System.arraycopy(segment, 0, merged, position, segment.length);
-                position += segment.length;
+                ByteBuffer duplicate = segment.duplicate();
+                int length = duplicate.remaining();
+                duplicate.get(merged, position, length);
+                position += length;
             }
             return merged;
         }
@@ -2647,7 +2723,7 @@ public class FastJavaNioServer {
         }
 
         private boolean hasPendingWrite() {
-            return !pendingWrites.isEmpty() || pendingFileRemaining > 0;
+            return (pendingWrites != null && !pendingWrites.isEmpty()) || pendingFileRemaining > 0;
         }
 
         private boolean shouldCloseAfterWrite() {
@@ -2684,13 +2760,15 @@ public class FastJavaNioServer {
             }
         }
 
-        private void enqueueCompletedResponse(long sequence, HttpExecutionResult executionResult,
-                boolean closeAfterWrite) {
-            completedResponses.put(sequence, new NioQueuedResponse(executionResult, closeAfterWrite));
+        private void enqueueCompletedResponse(NioCompletion completion) {
+            completedResponses().put(completion.sequence(), completion);
         }
 
-        private NioQueuedResponse pollNextOrderedResponse() {
-            NioQueuedResponse response = completedResponses.remove(nextResponseSequence);
+        private NioCompletion pollNextOrderedResponse() {
+            if (completedResponses == null) {
+                return null;
+            }
+            NioCompletion response = completedResponses.remove(nextResponseSequence);
             if (response != null) {
                 nextResponseSequence++;
             }
@@ -2747,8 +2825,10 @@ public class FastJavaNioServer {
 
         private long pendingWriteBytes() {
             long total = pendingFileRemaining;
-            for (ByteBuffer pendingWrite : pendingWrites) {
-                total += pendingWrite.remaining();
+            if (pendingWrites != null) {
+                for (ByteBuffer pendingWrite : pendingWrites) {
+                    total += pendingWrite.remaining();
+                }
             }
             return total;
         }
@@ -2905,14 +2985,25 @@ public class FastJavaNioServer {
 
         private void closeResources() throws IOException {
             clearPendingFileTransfer();
-            completedResponses.clear();
+            if (completedResponses != null) {
+                completedResponses.clear();
+            }
+            if (http2Streams != null) {
+                http2Streams.clear();
+            }
+            if (queuedHttp2DataByStream != null) {
+                queuedHttp2DataByStream.clear();
+            }
+            if (queuedHttp2StreamOrder != null) {
+                queuedHttp2StreamOrder.clear();
+            }
+            if (queuedHttp2StreamSet != null) {
+                queuedHttp2StreamSet.clear();
+            }
             if (tlsHandler != null) {
                 tlsHandler.close();
             }
         }
-    }
-
-    private record NioQueuedResponse(HttpExecutionResult executionResult, boolean closeAfterWrite) {
     }
 
     private static final class Http2StreamState {

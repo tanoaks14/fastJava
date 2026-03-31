@@ -1,6 +1,7 @@
 package com.fastjava.servlet;
 
 import java.io.PrintWriter;
+import java.nio.ByteBuffer;
 
 /**
  * API-compatible minimal Servlet Response interface.
@@ -41,6 +42,19 @@ public interface HttpServletResponse {
 
     // Output
     PrintWriter getWriter();
+
+    default ByteBuffer[] getOutputByteBuffers() {
+        byte[][] segments = getOutputSegments();
+        if (segments == null || segments.length == 0) {
+            return new ByteBuffer[0];
+        }
+        ByteBuffer[] buffers = new ByteBuffer[segments.length];
+        for (int i = 0; i < segments.length; i++) {
+            byte[] segment = segments[i];
+            buffers[i] = segment == null ? null : ByteBuffer.wrap(segment);
+        }
+        return buffers;
+    }
 
     byte[][] getOutputSegments();
 

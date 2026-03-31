@@ -20,16 +20,21 @@ import io.opentelemetry.api.trace.Span;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class HttpRequestExecutor {
 
-    // Configurable via -Dfastjava.response.buffer.size=<bytes> (default 8192)
-    private static final int RESPONSE_BUFFER_SIZE = Integer.getInteger("fastjava.response.buffer.size", 8_192);
+    // Configurable via -Dfastjava.response.buffer.size=<bytes> (default 256)
+    private static final int RESPONSE_BUFFER_SIZE = Integer.getInteger("fastjava.response.buffer.size", 256);
+    // Thread-local pool: reuses DefaultHttpServletResponse per selector thread
+    // (eliminates per-request BAOS allocation)
+    private static final ThreadLocal<DefaultHttpServletResponse> RESPONSE_POOL = new ThreadLocal<>();
     // Configurable via -Dfastjava.access.log.enabled=true (default false for
     // performance)
     private static final boolean ACCESS_LOG_ENABLED = Boolean.getBoolean("fastjava.access.log.enabled");
@@ -94,7 +99,13 @@ public final class HttpRequestExecutor {
                 requestLimits,
                 SESSION_MANAGER,
                 router);
-        DefaultHttpServletResponse response = new DefaultHttpServletResponse(RESPONSE_BUFFER_SIZE);
+        DefaultHttpServletResponse response = RESPONSE_POOL.get();
+        if (response != null) {
+            RESPONSE_POOL.set(null); // check out from pool
+        } else {
+            response = new DefaultHttpServletResponse(RESPONSE_BUFFER_SIZE);
+        }
+        final DefaultHttpServletResponse requestResponse = response;
         SseEmitter requestSseEmitter = SseRuntime.currentEmitter();
         if (requestSseEmitter != null) {
             request.setAttribute(SseSupport.REQUEST_ATTRIBUTE, requestSseEmitter);
@@ -103,21 +114,33 @@ public final class HttpRequestExecutor {
         requestSpan.setAttribute("http.method", parsed.getMethod());
         requestSpan.setAttribute("http.target", parsed.getURI());
 
-        AsyncExecutionState asyncState = null;
+        AtomicReference<AsyncExecutionState> asyncStateRef = null;
         if (asyncResponseHandler != null) {
-            asyncState = new AsyncExecutionState(
-                    request,
-                    response,
-                    parsed,
-                    requestSseEmitter,
-                    secureRequest,
-                    forceCloseConnection,
-                    startedAtNanos,
-                    remoteAddr,
-                    remotePort,
-                    requestSpan,
-                    asyncResponseHandler);
-            request.configureAsyncContextFactory(asyncState::startAsync);
+            asyncStateRef = new AtomicReference<>();
+            AtomicReference<AsyncExecutionState> finalAsyncStateRef = asyncStateRef;
+            request.configureAsyncContextFactory(() -> {
+                AsyncExecutionState current = finalAsyncStateRef.get();
+                if (current == null) {
+                    AsyncExecutionState created = new AsyncExecutionState(
+                            request,
+                            requestResponse,
+                            parsed,
+                            requestSseEmitter,
+                            secureRequest,
+                            forceCloseConnection,
+                            startedAtNanos,
+                            remoteAddr,
+                            remotePort,
+                            requestSpan,
+                            asyncResponseHandler);
+                    if (!finalAsyncStateRef.compareAndSet(null, created)) {
+                        current = finalAsyncStateRef.get();
+                    } else {
+                        current = created;
+                    }
+                }
+                return current.startAsync();
+            });
         }
 
         try {
@@ -162,10 +185,8 @@ public final class HttpRequestExecutor {
             }
         }
 
+        AsyncExecutionState asyncState = asyncStateRef == null ? null : asyncStateRef.get();
         if (asyncState != null && asyncState.hasStarted()) {
-            if (asyncState.isCompleted()) {
-                return null;
-            }
             return null;
         }
 
@@ -183,8 +204,10 @@ public final class HttpRequestExecutor {
                     remotePort);
         } finally {
             requestSpan.close();
-            // Release the response builder buffer back to the pool if it was pooled
-            response.releaseBuffer();
+            // Recycle response into thread-local pool for reuse by next request on this
+            // thread
+            response.resetForForward();
+            RESPONSE_POOL.set(response);
         }
     }
 
@@ -221,7 +244,7 @@ public final class HttpRequestExecutor {
         }
 
         int statusCode = response.getStatus();
-        byte[][] responseSegments = response.getOutputSegments();
+        ByteBuffer[] responseSegments = response.getOutputByteBuffers();
         HttpExecutionResult result = new HttpExecutionResult(
                 responseSegments,
                 fileBody,
@@ -451,6 +474,7 @@ public final class HttpRequestExecutor {
                         remotePort);
             } finally {
                 requestSpan.close();
+                response.releaseBuffer();
             }
             notifyComplete();
             responseHandler.onComplete(result);
@@ -539,12 +563,12 @@ public final class HttpRequestExecutor {
         }
     }
 
-    private static long estimateBytesSent(byte[][] responseSegments, FileResponseBody fileBody) {
+    private static long estimateBytesSent(ByteBuffer[] responseSegments, FileResponseBody fileBody) {
         long total = 0;
         if (responseSegments != null) {
-            for (byte[] segment : responseSegments) {
+            for (ByteBuffer segment : responseSegments) {
                 if (segment != null) {
-                    total += segment.length;
+                    total += segment.remaining();
                 }
             }
         }

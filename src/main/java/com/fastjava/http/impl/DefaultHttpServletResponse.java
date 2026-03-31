@@ -3,6 +3,7 @@ package com.fastjava.http.impl;
 import com.fastjava.servlet.*;
 import com.fastjava.http.response.HttpResponseBuilder;
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.ZoneOffset;
@@ -15,9 +16,12 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
 
     private static final DateTimeFormatter COOKIE_EXPIRES_FORMATTER = DateTimeFormatter.RFC_1123_DATE_TIME
             .withZone(ZoneOffset.UTC);
+    private static final byte[] EMPTY_BODY = new byte[0];
+    private static final byte[] CRLF = "\r\n".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] CHUNK_TERMINATOR = "0\r\n\r\n".getBytes(StandardCharsets.US_ASCII);
 
     private final HttpResponseBuilder builder;
-    private final ByteArrayOutputStream outputBuffer;
+    private final FastByteArrayOutputStream outputBuffer;
     private final PrintWriter writer;
     private int statusCode = 200;
     private String contentType = "text/plain";
@@ -30,7 +34,7 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
 
     public DefaultHttpServletResponse(int initialBufferSize) {
         this.builder = new HttpResponseBuilder(initialBufferSize);
-        this.outputBuffer = new ByteArrayOutputStream(initialBufferSize);
+        this.outputBuffer = new FastByteArrayOutputStream(initialBufferSize);
         this.writer = new PrintWriter(
                 new java.io.OutputStreamWriter(outputBuffer, StandardCharsets.UTF_8), true);
     }
@@ -190,6 +194,73 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
     }
 
     @Override
+    public ByteBuffer[] getOutputByteBuffers() {
+        writer.flush();
+        if (contentType != null) {
+            builder.setContentType(contentType);
+        }
+
+        if (streamingChunkedResponseEnabled) {
+            return new ByteBuffer[] { ByteBuffer.wrap(builder.buildStreamingChunkedHeaders()) };
+        }
+
+        if (fileBodyPath != null) {
+            byte[][] headerSegments = builder.buildSegments(false, fileBodyLength);
+            return toByteBuffers(headerSegments);
+        }
+
+        if (chunkedResponseEnabled) {
+            int bodyLength = outputBuffer.size();
+            builder.setBody(EMPTY_BODY);
+            byte[][] headerSegments = new byte[][] { builder.buildStreamingChunkedHeaders() };
+            if (bodyLength == 0) {
+                return toByteBuffers(headerSegments);
+            }
+
+            byte[] chunkSizeLine = Integer.toHexString(bodyLength).getBytes(StandardCharsets.US_ASCII);
+            ByteBuffer[] buffers = new ByteBuffer[headerSegments.length + 5];
+            int index = 0;
+            for (byte[] segment : headerSegments) {
+                buffers[index++] = segment == null ? null : ByteBuffer.wrap(segment);
+            }
+            buffers[index++] = ByteBuffer.wrap(chunkSizeLine);
+            buffers[index++] = ByteBuffer.wrap(CRLF);
+            buffers[index++] = ByteBuffer.wrap(outputBuffer.toByteArray());
+            buffers[index++] = ByteBuffer.wrap(CRLF);
+            buffers[index] = ByteBuffer.wrap(CHUNK_TERMINATOR);
+            return buffers;
+        }
+
+        int bodyLength = outputBuffer.size();
+        builder.setBody(EMPTY_BODY);
+        byte[][] headerSegments = builder.buildSegments(false, (long) bodyLength);
+
+        if (bodyLength == 0) {
+            return toByteBuffers(headerSegments);
+        }
+
+        ByteBuffer[] buffers = new ByteBuffer[headerSegments.length + 1];
+        for (int i = 0; i < headerSegments.length; i++) {
+            byte[] segment = headerSegments[i];
+            buffers[i] = segment == null ? null : ByteBuffer.wrap(segment);
+        }
+        buffers[headerSegments.length] = ByteBuffer.wrap(outputBuffer.toByteArray());
+        return buffers;
+    }
+
+    private static ByteBuffer[] toByteBuffers(byte[][] segments) {
+        if (segments == null || segments.length == 0) {
+            return new ByteBuffer[0];
+        }
+        ByteBuffer[] buffers = new ByteBuffer[segments.length];
+        for (int i = 0; i < segments.length; i++) {
+            byte[] segment = segments[i];
+            buffers[i] = segment == null ? null : ByteBuffer.wrap(segment);
+        }
+        return buffers;
+    }
+
+    @Override
     public void setChunkedResponseEnabled(boolean enabled) {
         if (enabled && fileBodyPath != null) {
             throw new IllegalStateException("Chunked responses are not supported for file-backed bodies");
@@ -339,6 +410,16 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
         }
         if (fieldName.equals("Cookie name") && value.indexOf(';') >= 0) {
             throw new IllegalArgumentException("Cookie name cannot contain ';'");
+        }
+    }
+
+    private static final class FastByteArrayOutputStream extends ByteArrayOutputStream {
+        private FastByteArrayOutputStream(int size) {
+            super(size);
+        }
+
+        private byte[] rawBuffer() {
+            return buf;
         }
     }
 

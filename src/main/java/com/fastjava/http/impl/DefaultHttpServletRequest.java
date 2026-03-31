@@ -26,6 +26,10 @@ import java.util.function.Supplier;
 public class DefaultHttpServletRequest implements HttpServletRequest {
 
     private final ParsedHttpRequest parsed;
+    private String attributeKey1;
+    private Object attributeValue1;
+    private String attributeKey2;
+    private Object attributeValue2;
     private Map<String, Object> attributes;
     private final String remoteAddr;
     private final int remotePort;
@@ -127,7 +131,7 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
 
     @Override
     public Enumeration<String> getHeaderNames() {
-        return Collections.enumeration(parsed.headers.keySet());
+        return Collections.enumeration(parsed.headerNames());
     }
 
     @Override
@@ -550,11 +554,41 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
 
     @Override
     public Object getAttribute(String name) {
+        if (name == null) {
+            return null;
+        }
+        if (name.equals(attributeKey1)) {
+            return attributeValue1;
+        }
+        if (name.equals(attributeKey2)) {
+            return attributeValue2;
+        }
         return attributes == null ? null : attributes.get(name);
     }
 
     @Override
     public void setAttribute(String name, Object object) {
+        if (name == null) {
+            return;
+        }
+        if (name.equals(attributeKey1)) {
+            attributeValue1 = object;
+            return;
+        }
+        if (name.equals(attributeKey2)) {
+            attributeValue2 = object;
+            return;
+        }
+        if (attributeKey1 == null) {
+            attributeKey1 = name;
+            attributeValue1 = object;
+            return;
+        }
+        if (attributeKey2 == null) {
+            attributeKey2 = name;
+            attributeValue2 = object;
+            return;
+        }
         if (attributes == null) {
             attributes = new HashMap<>(4);
         }

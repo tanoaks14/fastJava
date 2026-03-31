@@ -330,19 +330,7 @@ public final class HttpRequestInspector {
                 return -1;
             }
 
-            String rawSize = new String(buffer, cursor, lineEnd - cursor, StandardCharsets.US_ASCII);
-            int extensionIndex = rawSize.indexOf(';');
-            String sizeToken = (extensionIndex >= 0 ? rawSize.substring(0, extensionIndex) : rawSize).trim();
-            if (sizeToken.isEmpty()) {
-                throw new IllegalArgumentException("Invalid chunk size");
-            }
-
-            final int chunkSize;
-            try {
-                chunkSize = Integer.parseInt(sizeToken, 16);
-            } catch (NumberFormatException exception) {
-                throw new IllegalArgumentException("Invalid chunk size", exception);
-            }
+            final int chunkSize = parseChunkSize(buffer, cursor, lineEnd);
 
             if (chunkSize < 0 || chunkSize > limits.maxChunkSizeBytes()) {
                 throw new IllegalArgumentException("Chunk size exceeds limits");
@@ -391,5 +379,64 @@ public final class HttpRequestInspector {
         if (colonIndex <= start || colonIndex >= end - 1) {
             throw new IllegalArgumentException("Invalid trailer header");
         }
+    }
+
+    private static int parseChunkSize(byte[] buffer, int start, int endExclusive) {
+        int cursor = start;
+        while (cursor < endExclusive && (buffer[cursor] == ' ' || buffer[cursor] == '\t')) {
+            cursor++;
+        }
+
+        long value = 0;
+        boolean hasDigit = false;
+
+        while (cursor < endExclusive) {
+            byte current = buffer[cursor];
+            if (current == ';') {
+                break;
+            }
+            if (current == ' ' || current == '\t') {
+                while (cursor < endExclusive) {
+                    byte trailing = buffer[cursor];
+                    if (trailing == ';') {
+                        break;
+                    }
+                    if (trailing != ' ' && trailing != '\t') {
+                        throw new IllegalArgumentException("Invalid chunk size");
+                    }
+                    cursor++;
+                }
+                break;
+            }
+
+            int hex = hexValue(current);
+            if (hex < 0) {
+                throw new IllegalArgumentException("Invalid chunk size");
+            }
+            hasDigit = true;
+            value = (value << 4) + hex;
+            if (value > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("Chunk size exceeds limits");
+            }
+            cursor++;
+        }
+
+        if (!hasDigit) {
+            throw new IllegalArgumentException("Invalid chunk size");
+        }
+        return (int) value;
+    }
+
+    private static int hexValue(byte value) {
+        if (value >= '0' && value <= '9') {
+            return value - '0';
+        }
+        if (value >= 'a' && value <= 'f') {
+            return value - 'a' + 10;
+        }
+        if (value >= 'A' && value <= 'F') {
+            return value - 'A' + 10;
+        }
+        return -1;
     }
 }
