@@ -27,6 +27,8 @@ public class HttpRequestParser {
     private static final String HEADER_CONNECTION = "connection";
     private static final String HEADER_COOKIE = "cookie";
     private static final String HEADER_ACCEPT_ENCODING = "accept-encoding";
+    private static final String HEADER_ACCEPT = "accept";
+    private static final String HEADER_USER_AGENT = "user-agent";
     private static final byte[] HEADER_CONTENT_LENGTH_BYTES = HEADER_CONTENT_LENGTH.getBytes(StandardCharsets.US_ASCII);
     private static final byte[] HEADER_CONTENT_TYPE_BYTES = HEADER_CONTENT_TYPE.getBytes(StandardCharsets.US_ASCII);
     private static final byte[] HEADER_TRANSFER_ENCODING_BYTES = HEADER_TRANSFER_ENCODING
@@ -36,6 +38,8 @@ public class HttpRequestParser {
     private static final byte[] HEADER_COOKIE_BYTES = HEADER_COOKIE.getBytes(StandardCharsets.US_ASCII);
     private static final byte[] HEADER_ACCEPT_ENCODING_BYTES = HEADER_ACCEPT_ENCODING
             .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_ACCEPT_BYTES = HEADER_ACCEPT.getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_USER_AGENT_BYTES = HEADER_USER_AGENT.getBytes(StandardCharsets.US_ASCII);
 
     /**
      * Parse HTTP request from raw bytes.
@@ -291,6 +295,12 @@ public class HttpRequestParser {
         }
         if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_ACCEPT_ENCODING_BYTES)) {
             return HEADER_ACCEPT_ENCODING;
+        }
+        if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_ACCEPT_BYTES)) {
+            return HEADER_ACCEPT;
+        }
+        if (equalsAsciiIgnoreCase(buffer, start, end, HEADER_USER_AGENT_BYTES)) {
+            return HEADER_USER_AGENT;
         }
         return normalizeHeaderName(buffer, start, end);
     }

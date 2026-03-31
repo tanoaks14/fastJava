@@ -230,10 +230,10 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
             }
         }
 
-        Map<String, String[]> params = new HashMap<>();
+        Map<String, String[]> params = new HashMap<>(valuesByKey.size());
         for (Map.Entry<String, List<String>> entry : valuesByKey.entrySet()) {
             List<String> values = entry.getValue();
-            params.put(entry.getKey(), values.toArray(new String[0]));
+            params.put(entry.getKey(), values.toArray(new String[values.size()]));
         }
         parameterMap = params;
         return parameterMap;

@@ -2703,9 +2703,14 @@ public class FastJavaNioServer {
                 if (segment == null || !segment.hasRemaining()) {
                     continue;
                 }
-                ByteBuffer duplicate = segment.duplicate();
-                int length = duplicate.remaining();
-                duplicate.get(merged, position, length);
+                int length = segment.remaining();
+                if (segment.hasArray()) {
+                    int offset = segment.arrayOffset() + segment.position();
+                    System.arraycopy(segment.array(), offset, merged, position, length);
+                } else {
+                    ByteBuffer duplicate = segment.duplicate();
+                    duplicate.get(merged, position, length);
+                }
                 position += length;
             }
             return merged;

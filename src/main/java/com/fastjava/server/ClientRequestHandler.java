@@ -241,12 +241,13 @@ public class ClientRequestHandler implements Runnable {
                     try (RequestTracing.SpanScope ignored = RequestTracing.startChildSpan("http.write")) {
                         for (ByteBuffer segment : responseResult.responseBuffers()) {
                             if (segment != null && segment.hasRemaining()) {
-                                ByteBuffer duplicate = segment.duplicate();
-                                int length = duplicate.remaining();
-                                if (duplicate.hasArray()) {
-                                    int offset = duplicate.arrayOffset() + duplicate.position();
-                                    writeTimeoutGuard.execute(() -> output.write(duplicate.array(), offset, length));
+                                int length = segment.remaining();
+                                if (segment.hasArray()) {
+                                    int offset = segment.arrayOffset() + segment.position();
+                                    byte[] source = segment.array();
+                                    writeTimeoutGuard.execute(() -> output.write(source, offset, length));
                                 } else {
+                                    ByteBuffer duplicate = segment.duplicate();
                                     byte[] copy = new byte[length];
                                     duplicate.get(copy);
                                     writeTimeoutGuard.execute(() -> output.write(copy));
