@@ -10,6 +10,9 @@ public final class HttpRequestInspector {
 
     private static final int EXPECTATION_OK = 0;
     private static final int EXPECTATION_FAILED = 417;
+    private static final byte[] HEADER_CONTENT_LENGTH = "content-length".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_TRANSFER_ENCODING = "transfer-encoding".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEADER_EXPECT = "expect".getBytes(StandardCharsets.US_ASCII);
 
     private HttpRequestInspector() {
     }
@@ -46,8 +49,8 @@ public final class HttpRequestInspector {
         final String contentLengthHeader;
         final String transferEncoding;
         try {
-            contentLengthHeader = extractHeaderValue(buffer, headerEnd, "Content-Length");
-            transferEncoding = extractHeaderValue(buffer, headerEnd, "Transfer-Encoding");
+            contentLengthHeader = extractHeaderValue(buffer, headerEnd, HEADER_CONTENT_LENGTH, "Content-Length");
+            transferEncoding = extractHeaderValue(buffer, headerEnd, HEADER_TRANSFER_ENCODING, "Transfer-Encoding");
         } catch (IllegalArgumentException malformedHeaders) {
             return new RequestValidationResult(400, "Bad Request");
         }
@@ -105,7 +108,7 @@ public final class HttpRequestInspector {
             return EXPECTATION_OK;
         }
 
-        String expectHeader = extractHeaderValue(buffer, headerEnd, "Expect");
+        String expectHeader = extractHeaderValue(buffer, headerEnd, HEADER_EXPECT, "Expect");
         if (expectHeader == null || expectHeader.isBlank()) {
             return EXPECTATION_OK;
         }
@@ -127,12 +130,12 @@ public final class HttpRequestInspector {
             return false;
         }
 
-        String expectHeader = extractHeaderValue(buffer, headerEnd, "Expect");
+        String expectHeader = extractHeaderValue(buffer, headerEnd, HEADER_EXPECT, "Expect");
         if (!"100-continue".equalsIgnoreCase(expectHeader == null ? null : expectHeader.trim())) {
             return false;
         }
 
-        String transferEncoding = extractHeaderValue(buffer, headerEnd, "Transfer-Encoding");
+        String transferEncoding = extractHeaderValue(buffer, headerEnd, HEADER_TRANSFER_ENCODING, "Transfer-Encoding");
         if (transferEncoding != null) {
             if (!isChunkedTransferEncoding(transferEncoding)) {
                 return false;
@@ -144,7 +147,7 @@ public final class HttpRequestInspector {
             }
         }
 
-        String contentLengthHeader = extractHeaderValue(buffer, headerEnd, "Content-Length");
+        String contentLengthHeader = extractHeaderValue(buffer, headerEnd, HEADER_CONTENT_LENGTH, "Content-Length");
         if (contentLengthHeader == null) {
             return false;
         }
@@ -250,8 +253,7 @@ public final class HttpRequestInspector {
         return false;
     }
 
-    private static String extractHeaderValue(byte[] buffer, int headerEnd, String headerName) {
-        byte[] headerNameBytes = headerName.toLowerCase().getBytes(StandardCharsets.US_ASCII);
+    private static String extractHeaderValue(byte[] buffer, int headerEnd, byte[] headerNameBytes, String headerName) {
         int scanLimit = Math.min(buffer.length, headerEnd + 2);
         int requestLineEnd = SIMDByteScanner.findCRLF(buffer, 0, scanLimit);
         if (requestLineEnd == -1) {

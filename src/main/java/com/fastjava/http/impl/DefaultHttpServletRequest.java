@@ -500,7 +500,7 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
         String headerValue = parsed.getHeader("Content-Length");
         if (headerValue == null) {
             String transferEncoding = parsed.getHeader("Transfer-Encoding");
-            if (transferEncoding != null && transferEncoding.toLowerCase(Locale.ROOT).contains("chunked")) {
+            if (containsTokenIgnoreCase(transferEncoding, "chunked")) {
                 return -1;
             }
             return parsed.bodyLength;
@@ -515,6 +515,25 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
     @Override
     public String getContentType() {
         return parsed.getHeader("Content-Type");
+    }
+
+    private static boolean containsTokenIgnoreCase(String csv, String token) {
+        if (csv == null || token == null) {
+            return false;
+        }
+        int start = 0;
+        while (start < csv.length()) {
+            int end = csv.indexOf(',', start);
+            if (end < 0) {
+                end = csv.length();
+            }
+            String candidate = csv.substring(start, end).trim();
+            if (token.equalsIgnoreCase(candidate)) {
+                return true;
+            }
+            start = end + 1;
+        }
+        return false;
     }
 
     @Override
