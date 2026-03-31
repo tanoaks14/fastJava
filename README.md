@@ -524,12 +524,14 @@ Run it:
 
 Latest recorded run (GET `/hello`, warmup=1000, requests=10000, concurrency=32):
 
+## Aggregate (median across rounds)
+
 | Server | Throughput (req/s) | Avg Latency (ms) | p95 (ms) | p99 (ms) | Errors |
 |---|---:|---:|---:|---:|---:|
-| Netty | 22026.66 | 1.433 | 2.752 | 4.955 | 0 |
-| Undertow | 19531.14 | 1.619 | 3.064 | 11.098 | 0 |
-| Tomcat | 19417.60 | 1.631 | 3.419 | 4.936 | 0 |
-| FastJava | 6357.20 | 5.012 | 9.485 | 36.251 | 0 |
+| Tomcat | 41574.96 | 0.384 | 0.750 | 1.356 | 0 |
+| Undertow | 40151.99 | 0.397 | 0.844 | 1.432 | 0 |
+| FastJava | 35716.29 | 0.447 | 0.781 | 1.202 | 0 |
+| Netty | 35682.48 | 0.447 | 1.084 | 1.711 | 0 |
 
 Notes:
 - This is an in-process directional benchmark for rapid iteration.
