@@ -2095,7 +2095,7 @@ public class FastJavaNioServer {
         private Deque<ByteBuffer> pendingWrites;
         private ByteBuffer[] gatherWriteBatch;
         private ByteBuffer[] gatherWriteOriginals;
-        private int[] gatherWriteAllowedLengths;
+        private int[] gatherWriteOriginalLimits;
         private Map<Long, NioCompletion> completedResponses;
         private int bufferedBytes;
         private int inFlightRequests;
@@ -2153,7 +2153,7 @@ public class FastJavaNioServer {
             this.pendingWrites = null;
             this.gatherWriteBatch = null;
             this.gatherWriteOriginals = null;
-            this.gatherWriteAllowedLengths = null;
+            this.gatherWriteOriginalLimits = null;
             this.completedResponses = null;
             this.state = State.READING;
             this.lastActivityTimeMillis = System.currentTimeMillis();
@@ -2236,7 +2236,7 @@ public class FastJavaNioServer {
             if (gatherWriteBatch == null) {
                 gatherWriteBatch = new ByteBuffer[GATHER_WRITE_BATCH_SIZE];
                 gatherWriteOriginals = new ByteBuffer[GATHER_WRITE_BATCH_SIZE];
-                gatherWriteAllowedLengths = new int[GATHER_WRITE_BATCH_SIZE];
+                gatherWriteOriginalLimits = new int[GATHER_WRITE_BATCH_SIZE];
             }
         }
 
@@ -2520,19 +2520,25 @@ public class FastJavaNioServer {
                     if (allowed == current.remaining()) {
                         bytesWritten = tlsHandler.write(current);
                     } else {
-                        ByteBuffer limited = current.duplicate();
-                        limited.limit(limited.position() + allowed);
-                        bytesWritten = tlsHandler.write(limited);
-                        current.position(current.position() + bytesWritten);
+                        int originalLimit = current.limit();
+                        current.limit(current.position() + allowed);
+                        try {
+                            bytesWritten = tlsHandler.write(current);
+                        } finally {
+                            current.limit(originalLimit);
+                        }
                     }
                 } else {
                     if (allowed == current.remaining()) {
                         bytesWritten = channel.write(current);
                     } else {
-                        ByteBuffer limited = current.duplicate();
-                        limited.limit(limited.position() + allowed);
-                        bytesWritten = channel.write(limited);
-                        current.position(current.position() + bytesWritten);
+                        int originalLimit = current.limit();
+                        current.limit(current.position() + allowed);
+                        try {
+                            bytesWritten = channel.write(current);
+                        } finally {
+                            current.limit(originalLimit);
+                        }
                     }
                 }
 
@@ -2600,37 +2606,38 @@ public class FastJavaNioServer {
                 if (allowed <= 0) {
                     break;
                 }
-                ByteBuffer view = pendingWrite.duplicate();
-                view.limit(view.position() + allowed);
-                gatherWriteBatch[count] = view;
+                gatherWriteBatch[count] = pendingWrite;
                 gatherWriteOriginals[count] = pendingWrite;
-                gatherWriteAllowedLengths[count] = allowed;
+                gatherWriteOriginalLimits[count] = pendingWrite.limit();
+                if (allowed < pendingWrite.remaining()) {
+                    pendingWrite.limit(pendingWrite.position() + allowed);
+                }
                 remainingBudget -= allowed;
                 count++;
             }
 
             if (count <= 1) {
+                restoreGatherWriteLimits(count);
                 return 0;
             }
 
-            long writtenLong = channel.write(gatherWriteBatch, 0, count);
+            long writtenLong;
+            try {
+                writtenLong = channel.write(gatherWriteBatch, 0, count);
+            } finally {
+                restoreGatherWriteLimits(count);
+            }
+
             if (writtenLong <= 0) {
                 return 0;
             }
 
             int written = (int) Math.min(Integer.MAX_VALUE, writtenLong);
-            int remaining = written;
-            for (int i = 0; i < count && remaining > 0; i++) {
-                ByteBuffer original = gatherWriteOriginals[i];
-                int consumed = Math.min(gatherWriteAllowedLengths[i], remaining);
-                original.position(original.position() + consumed);
-                remaining -= consumed;
-            }
 
             for (int i = 0; i < count; i++) {
                 gatherWriteBatch[i] = null;
                 gatherWriteOriginals[i] = null;
-                gatherWriteAllowedLengths[i] = 0;
+                gatherWriteOriginalLimits[i] = 0;
             }
 
             while (!writes.isEmpty() && !writes.peekFirst().hasRemaining()) {
@@ -2650,7 +2657,7 @@ public class FastJavaNioServer {
             } else {
                 for (ByteBuffer responseSegment : responseSegments) {
                     if (responseSegment != null && responseSegment.hasRemaining()) {
-                        pendingWrites().addLast(responseSegment.duplicate());
+                        pendingWrites().addLast(responseSegment);
                     }
                 }
             }
@@ -2714,6 +2721,15 @@ public class FastJavaNioServer {
                 position += length;
             }
             return merged;
+        }
+
+        private void restoreGatherWriteLimits(int count) {
+            for (int i = 0; i < count; i++) {
+                ByteBuffer original = gatherWriteOriginals[i];
+                if (original != null) {
+                    original.limit(gatherWriteOriginalLimits[i]);
+                }
+            }
         }
 
         private void consume(int bytesConsumed) {

@@ -14,14 +14,14 @@
 #>
 Param(
     [int]$CrossWarmupRequests = 10000,
-    [int]$CrossBenchmarkRequests = 50000,
-    [int]$CrossConcurrency = 32,
+    [int]$CrossBenchmarkRequests = 150000,
+    [int]$CrossConcurrency = 16,
     [int]$CrossRounds = 5,
 
     [int]$ProfilePort = 19080,
     [int]$WarmupRequests = 200000,
     [int]$CaptureBatchRequests = 300000,
-    [int]$Concurrency = 32,
+    [int]$Concurrency = 16,
     [int]$JfrDurationSeconds = 40,
 
     [string]$OutputRoot = "benchmarks/webserver-comparison/results/oneclick"

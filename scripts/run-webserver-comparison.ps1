@@ -1,7 +1,7 @@
 Param(
-    [int]$WarmupRequests = 10000,
-    [int]$BenchmarkRequests = 50000,
-    [int]$Concurrency = 32,
+    [int]$WarmupRequests = 30000,
+    [int]$BenchmarkRequests = 150000,
+    [int]$Concurrency = 16,
     [int]$Rounds = 5
 )
 
