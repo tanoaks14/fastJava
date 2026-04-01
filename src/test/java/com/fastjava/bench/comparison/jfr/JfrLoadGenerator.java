@@ -6,18 +6,17 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Standalone HTTP load generator for JFR profiling.
- * Sends concurrent HTTP requests to a specified endpoint.
- * 
+ * Standalone HTTP load generator for JFR profiling. Sends concurrent HTTP
+ * requests to a specified endpoint.
+ *
  * Usage: java JfrLoadGenerator --url=<url> --requests=<n> --concurrency=<n>
  */
 public class JfrLoadGenerator {
@@ -52,10 +51,11 @@ public class JfrLoadGenerator {
     }
 
     private static void runLoad(String url, int totalRequests, int concurrency) throws Exception {
+        ExecutorService clientExecutor = Executors.newFixedThreadPool(Math.max(4, concurrency));
         var client = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(5))
-                .executor(java.util.concurrent.Executors.newFixedThreadPool(concurrency))
+                .executor(clientExecutor)
                 .build();
 
         var request = HttpRequest.newBuilder()
@@ -67,7 +67,9 @@ public class JfrLoadGenerator {
         var remaining = new java.util.concurrent.atomic.AtomicInteger(totalRequests);
         var success = new LongAdder();
         var errors = new LongAdder();
-        var latencies = Collections.synchronizedList(new ArrayList<Long>());
+        var latencyNanosTotal = new LongAdder();
+        var latencies = new long[totalRequests];
+        var latencyIndex = new AtomicInteger();
 
         ExecutorService executor = Executors.newFixedThreadPool(concurrency);
         CountDownLatch latch = new CountDownLatch(concurrency);
@@ -80,8 +82,9 @@ public class JfrLoadGenerator {
                 try {
                     while (true) {
                         int req = remaining.decrementAndGet();
-                        if (req < 0)
+                        if (req < 0) {
                             break;
+                        }
 
                         long startNanos = System.nanoTime();
                         try {
@@ -95,7 +98,11 @@ public class JfrLoadGenerator {
                             errors.increment();
                         }
                         long latencyNanos = System.nanoTime() - startNanos;
-                        latencies.add(latencyNanos);
+                        latencyNanosTotal.add(latencyNanos);
+                        int index = latencyIndex.getAndIncrement();
+                        if (index < latencies.length) {
+                            latencies[index] = latencyNanos;
+                        }
                     }
                 } finally {
                     latch.countDown();
@@ -108,21 +115,23 @@ public class JfrLoadGenerator {
         long elapsedNanos = java.time.Duration.between(startTime, Instant.now()).toNanos();
 
         executor.shutdown();
-        executor.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS);
+        executor.awaitTermination(10, TimeUnit.SECONDS);
+        clientExecutor.shutdown();
+        clientExecutor.awaitTermination(10, TimeUnit.SECONDS);
 
         // Report results
         long successCount = success.sum();
         long errorCount = errors.sum();
         long totalCompleted = successCount + errorCount;
+        int latencyCount = (int) Math.min(totalCompleted, latencies.length);
 
         double throughput = totalCompleted > 0 ? (totalCompleted * 1_000_000_000.0 / elapsedNanos) : 0;
-        double avgLatency = totalCompleted > 0 ? (latencies.stream().mapToLong(Long::longValue).sum() /
-                (totalCompleted * 1_000_000.0)) : 0;
+        double avgLatency = totalCompleted > 0 ? (latencyNanosTotal.sum() / (totalCompleted * 1_000_000.0)) : 0;
 
         // Calculate percentiles
-        Collections.sort(latencies);
-        long p95Nanos = getPercentile(latencies, 0.95);
-        long p99Nanos = getPercentile(latencies, 0.99);
+        java.util.Arrays.sort(latencies, 0, latencyCount);
+        long p95Nanos = getPercentile(latencies, latencyCount, 0.95);
+        long p99Nanos = getPercentile(latencies, latencyCount, 0.99);
         double p95Millis = p95Nanos / 1_000_000.0;
         double p99Millis = p99Nanos / 1_000_000.0;
 
@@ -141,10 +150,14 @@ public class JfrLoadGenerator {
         }
     }
 
-    private static long getPercentile(List<Long> sortedValues, double percentile) {
-        if (sortedValues.isEmpty())
+    private static long getPercentile(long[] sortedValues, int size, double percentile) {
+        if (size <= 0) {
             return 0;
-        int index = (int) (sortedValues.size() * percentile);
-        return sortedValues.get(Math.min(index, sortedValues.size() - 1));
+        }
+        int index = Math.max(0, (int) Math.ceil(size * percentile) - 1);
+        if (index >= size) {
+            index = size - 1;
+        }
+        return sortedValues[index];
     }
 }

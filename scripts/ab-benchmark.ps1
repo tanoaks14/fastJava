@@ -26,6 +26,10 @@
 .PARAMETER Port
     Port for the isolated server. Default 19080.
 
+.PARAMETER RoutePath
+    Route to benchmark (for dynamic servlet focus use /api/hello).
+    Default /api/hello.
+
 .EXAMPLE
     # Compare tracing off vs tracing off + access log off
     .\scripts\ab-benchmark.ps1 `
@@ -45,7 +49,8 @@ Param(
     [int]$BenchmarkRequests  = 100000,
     [int]$Concurrency        = 32,
     [int]$Rounds             = 5,
-    [int]$Port               = 19080
+    [int]$Port               = 19080,
+    [string]$RoutePath       = "/api/hello"
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,11 +101,24 @@ function Measure-Throughput {
     param([int]$ListenPort)
     $output = & java -cp $runtimeClasspath `
         com.fastjava.bench.profile.SimpleHttpLoadGenerator `
-        "http://127.0.0.1:$ListenPort/hello" `
+        "http://127.0.0.1:$ListenPort$RoutePath" `
         $BenchmarkRequests $Concurrency $WarmupRequests 2>&1
+    $throughput = $null
+    $success = $null
+    $errors = $null
     foreach ($line in $output) {
-        if ($line -match "throughput=([\d.]+)") {
-            return [double]$Matches[1]
+        if ($line -match "LOAD_RESULT\s+throughput=([\d.]+)\s+req/s\s+success=(\d+)\s+errors=(\d+)") {
+            $throughput = [double]$Matches[1]
+            $success = [long]$Matches[2]
+            $errors = [long]$Matches[3]
+            break
+        }
+    }
+    if ($null -ne $throughput) {
+        return [PSCustomObject]@{
+            Throughput = $throughput
+            Success = $success
+            Errors = $errors
         }
     }
     throw "Load generator produced no throughput line.`n$($output -join "`n")"
@@ -114,45 +132,70 @@ function Get-Median {
     return $sorted[$mid]
 }
 
+function Get-MedianLong {
+    param([long[]]$Values)
+    $sorted = $Values | Sort-Object
+    $mid = [int]($sorted.Count / 2)
+    if ($sorted.Count % 2 -eq 0) {
+        return [long](($sorted[$mid - 1] + $sorted[$mid]) / 2)
+    }
+    return [long]$sorted[$mid]
+}
+
 # ── Run one side ───────────────────────────────────────────────────────────────
 function Invoke-Side {
     param([string]$Label, [string]$Flags, [int]$ListenPort)
     Write-Host ""
     Write-Host "── $Label ──"
     if ($Flags -ne "") { Write-Host "   JVM flags: $Flags" }
-    $results = @()
+    $throughputs = @()
+    $successes = @()
+    $errors = @()
     for ($r = 1; $r -le $Rounds; $r++) {
         $srv = Start-FjServer -ExtraFlags $Flags -ListenPort $ListenPort
         try {
-            $tps = Measure-Throughput -ListenPort $ListenPort
-            $results += $tps
-            Write-Host ("  round {0}: {1:N2} req/s" -f $r, $tps)
+            $sample = Measure-Throughput -ListenPort $ListenPort
+            $throughputs += [double]$sample.Throughput
+            $successes += [long]$sample.Success
+            $errors += [long]$sample.Errors
+            Write-Host ("  round {0}: {1:N2} req/s, success={2}, errors={3}" -f $r, $sample.Throughput, $sample.Success, $sample.Errors)
         } finally {
             Stop-FjServer -Proc $srv
             Start-Sleep -Milliseconds 300
         }
     }
-    return ,$results
+    return [PSCustomObject]@{
+        Throughputs = $throughputs
+        Successes = $successes
+        Errors = $errors
+    }
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "=== FastJava A/B Benchmark ==="
+Write-Host ("Route={0}" -f $RoutePath)
 Write-Host ("Warmup={0}  Benchmark={1}  Concurrency={2}  Rounds={3}" -f $WarmupRequests, $BenchmarkRequests, $Concurrency, $Rounds)
 
-$baselineResults  = Invoke-Side -Label "Baseline"  -Flags $BaselineFlags  -ListenPort $Port
-$candidateResults = Invoke-Side -Label "Candidate" -Flags $CandidateFlags -ListenPort $Port
+$baseline  = Invoke-Side -Label "Baseline"  -Flags $BaselineFlags  -ListenPort $Port
+$candidate = Invoke-Side -Label "Candidate" -Flags $CandidateFlags -ListenPort $Port
 
-$baselineMedian  = Get-Median -Values $baselineResults
-$candidateMedian = Get-Median -Values $candidateResults
+$baselineMedian  = Get-Median -Values $baseline.Throughputs
+$candidateMedian = Get-Median -Values $candidate.Throughputs
 $delta           = $candidateMedian - $baselineMedian
 $pct             = if ($baselineMedian -gt 0) { ($delta / $baselineMedian) * 100 } else { 0 }
 $sign            = if ($delta -ge 0) { "+" } else { "" }
+$baselineErrorsMedian = Get-MedianLong -Values $baseline.Errors
+$candidateErrorsMedian = Get-MedianLong -Values $candidate.Errors
+$baselineSuccessMedian = Get-MedianLong -Values $baseline.Successes
+$candidateSuccessMedian = Get-MedianLong -Values $candidate.Successes
 
 Write-Host ""
 Write-Host "=== Results ==="
-Write-Host ("Baseline  median : {0,10:N2} req/s   (rounds: {1})" -f $baselineMedian,  ($baselineResults  | ForEach-Object { "{0:N0}" -f $_ }) -join ", ")
-Write-Host ("Candidate median : {0,10:N2} req/s   (rounds: {1})" -f $candidateMedian, ($candidateResults | ForEach-Object { "{0:N0}" -f $_ }) -join ", ")
+Write-Host ("Baseline  median : {0,10:N2} req/s   (rounds: {1})" -f $baselineMedian,  ($baseline.Throughputs  | ForEach-Object { "{0:N0}" -f $_ }) -join ", ")
+Write-Host ("Candidate median : {0,10:N2} req/s   (rounds: {1})" -f $candidateMedian, ($candidate.Throughputs | ForEach-Object { "{0:N0}" -f $_ }) -join ", ")
+Write-Host ("Baseline  medians: success={0} errors={1}" -f $baselineSuccessMedian, $baselineErrorsMedian)
+Write-Host ("Candidate medians: success={0} errors={1}" -f $candidateSuccessMedian, $candidateErrorsMedian)
 Write-Host ("Delta            : {0}{1:N2} req/s  ({0}{2:N2}%)" -f $sign, $delta, $pct)
 Write-Host ""
 if ($delta -gt 0) {

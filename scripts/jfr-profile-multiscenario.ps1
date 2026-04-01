@@ -87,9 +87,14 @@ $runtimeClasspath = "target/test-classes;target/classes;" + (Get-Content $cpFile
 
 Write-Host "Starting $ServerName in isolated JVM with JFR enabled..."
 
-$javaExe = Join-Path $env:JAVA_HOME "bin\java.exe"
-if (!(Test-Path $javaExe)) {
-    throw "Java not found at $javaExe. Set JAVA_HOME environment variable."
+$javaExe = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME "bin\java.exe" } else { "" }
+if ([string]::IsNullOrWhiteSpace($javaExe) -or !(Test-Path $javaExe)) {
+    $javaCommand = Get-Command java -ErrorAction SilentlyContinue
+    if ($null -eq $javaCommand) {
+        throw "Java executable not found. Set JAVA_HOME or add java to PATH."
+    }
+    $javaExe = $javaCommand.Source
+    Write-Host "JAVA_HOME not usable; falling back to PATH java: $javaExe"
 }
 
 $jfrStart = Join-Path $scenarioOutputDir "jfr-start-recording.jfr"
@@ -110,6 +115,13 @@ $serverProcArgs = @(
     "--single-server",
     $ServerName
 )
+
+$urls = @{
+    simple = "http://127.0.0.1:9876/hello"
+    dynamic = "http://127.0.0.1:9876/api/hello"
+    static = "http://127.0.0.1:9876/static/asset.txt"
+}
+$url = $urls[$Scenario]
 
 try {
     # Start in background (redirects stdout/stderr to null to avoid blocking)
@@ -132,44 +144,11 @@ try {
     
     Write-Host ""
     Write-Host "Sending warm-up requests ($WarmupRequests, $Concurrency threads)..."
-    
-    $warmupTaskCode = @{
-        warmup = $WarmupRequests
-        concurrency = $Concurrency
-        scenario = $Scenario
-        "=scriptblock=" = {
-            param($warmup, $concurrency, $scenario)
-            
-            $urls = @{
-                simple = "http://127.0.0.1:9876/hello"
-                dynamic = "http://127.0.0.1:9876/api/hello"
-                static = "http://127.0.0.1:9876/static/asset.txt"
-            }
-            $url = $urls[$scenario]
-            
-            $client = [System.Net.Http.HttpClient]::new()
-            $client.Timeout = [System.TimeSpan]::FromSeconds(5)
-            $remaining = [System.Collections.Concurrent.AtomicInteger]::new($warmup)
-            
-            $tasks = 0..$($concurrency - 1) | ForEach-Object {
-                [System.Threading.Tasks.Task]::Run({
-                    while ($remaining.DecrementAndGet() -ge 0) {
-                        try {
-                            $client.GetAsync($url).Wait()
-                        } catch {
-                            # ignore
-                        }
-                    }
-                })
-            }
-            
-            [System.Threading.Tasks.Task]::WaitAll($tasks)
-            $client.Dispose()
-        }
-    }.GetEnumerator() | ForEach-Object { $_.Value }
-    
-    # Use jmeter or direct load generation via PowerShell jobs
-    # For now, simplified: spawn PowerShell processes to generate load
+    & $javaExe -cp $runtimeClasspath `
+        com.fastjava.bench.comparison.jfr.JfrLoadGenerator `
+        "--url=$url" `
+        "--requests=$WarmupRequests" `
+        "--concurrency=$Concurrency" | Out-Host
     
     Write-Host "Warm-up sent. Waiting 3s..."
     Start-Sleep -Seconds 3
@@ -201,16 +180,14 @@ try {
     # ─────────────────────────────────────────────────────────────────────────────
     
     Write-Host "Sending benchmark requests while JFR records ($BenchmarkRequests, $Concurrency threads)..."
-    
-    $urls = @{
-        simple = "http://127.0.0.1:9876/hello"
-        dynamic = "http://127.0.0.1:9876/api/hello"
-        static = "http://127.0.0.1:9876/static/asset.txt"
-    }
-    $url = $urls[$Scenario]
-    
-    # Wait for JFR to complete
-    Start-Sleep -Seconds ($JfrDuration + 3)
+    & $javaExe -cp $runtimeClasspath `
+        com.fastjava.bench.comparison.jfr.JfrLoadGenerator `
+        "--url=$url" `
+        "--requests=$BenchmarkRequests" `
+        "--concurrency=$Concurrency" | Out-Host
+
+    # Give JFR a brief buffer to flush recording output.
+    Start-Sleep -Seconds 2
     
     # ─────────────────────────────────────────────────────────────────────────────
     # Capture heap histogram

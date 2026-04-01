@@ -17,6 +17,10 @@ final class RequestTracing {
     private RequestTracing() {
     }
 
+    static boolean isEnabled() {
+        return ENABLED;
+    }
+
     static SpanScope startServerSpan(String spanName) {
         if (!ENABLED) {
             return NOOP_SCOPE;

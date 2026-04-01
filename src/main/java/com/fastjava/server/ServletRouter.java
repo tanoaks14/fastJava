@@ -1,14 +1,5 @@
 package com.fastjava.server;
 
-import com.fastjava.http.simd.SIMDByteScanner;
-import com.fastjava.servlet.Filter;
-import com.fastjava.servlet.FilterConfig;
-import com.fastjava.servlet.HttpServlet;
-import com.fastjava.servlet.ServletConfig;
-import com.fastjava.servlet.ServletException;
-import com.fastjava.websocket.WebSocketEndpointMatch;
-import com.fastjava.websocket.WebSocketEndpointMetadata;
-import com.fastjava.websocket.WebSocketPathTemplate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -20,9 +11,19 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import com.fastjava.http.simd.SIMDByteScanner;
+import com.fastjava.servlet.Filter;
+import com.fastjava.servlet.FilterConfig;
+import com.fastjava.servlet.HttpServlet;
+import com.fastjava.servlet.ServletConfig;
+import com.fastjava.servlet.ServletException;
+import com.fastjava.websocket.WebSocketEndpointMatch;
+import com.fastjava.websocket.WebSocketEndpointMetadata;
+import com.fastjava.websocket.WebSocketPathTemplate;
+
 /**
- * Routes HTTP requests to appropriate servlets.
- * Supports exact path and pattern matching.
+ * Routes HTTP requests to appropriate servlets. Supports exact path and pattern
+ * matching.
  */
 public class ServletRouter {
 
@@ -30,6 +31,7 @@ public class ServletRouter {
     private static final int SIMD_MIN_PATTERN_LENGTH = 8;
 
     private final Map<String, RegisteredServlet> exactMappings = new ConcurrentHashMap<>();
+    private final Map<String, DispatchTarget> exactDispatchCache = new ConcurrentHashMap<>();
     private final List<PathPattern<RegisteredServlet>> patternMappings = new CopyOnWriteArrayList<>();
     private final List<PathPattern<RegisteredFilter>> filterMappings = new CopyOnWriteArrayList<>();
     private final Map<String, WebSocketEndpointMetadata> webSocketMappings = new ConcurrentHashMap<>();
@@ -46,12 +48,13 @@ public class ServletRouter {
         RegisteredServlet registration = new RegisteredServlet(path, servlet, servlet.getClass().getClassLoader(),
                 null);
         exactMappings.put(path, registration);
+        invalidateDispatchCaches();
         initializeServletIfNeeded(registration);
     }
 
     /**
-     * Register servlet with wildcard pattern.
-     * Patterns: "/api/*", "*.json", "/admin/.*"
+     * Register servlet with wildcard pattern. Patterns: "/api/*", "*.json",
+     * "/admin/.*"
      */
     public void addServletPattern(String pattern, HttpServlet servlet) throws ServletException {
         RegisteredServlet registration = new RegisteredServlet(
@@ -60,6 +63,7 @@ public class ServletRouter {
                 servlet.getClass().getClassLoader(),
                 null);
         patternMappings.add(new PathPattern<>(pattern, registration));
+        invalidateDispatchCaches();
         initializeServletIfNeeded(registration);
     }
 
@@ -80,12 +84,13 @@ public class ServletRouter {
      * Register filter for all request paths.
      */
     public void addFilter(Filter filter) throws ServletException {
+        invalidateDispatchCaches();
         addFilterPattern("/*", filter);
     }
 
     /**
-     * Registers an error page mapping.
-     * Replaces any existing mapping for the same status code or exception type.
+     * Registers an error page mapping. Replaces any existing mapping for the
+     * same status code or exception type.
      */
     public void addErrorPage(ErrorPage errorPage) {
         if (errorPage.exceptionType() != null) {
@@ -104,9 +109,9 @@ public class ServletRouter {
     }
 
     /**
-     * Finds a registered error page for the given exception, walking up the class
-     * hierarchy (exact match first, then superclasses up to {@link Throwable}).
-     * Returns {@code null} if none is registered.
+     * Finds a registered error page for the given exception, walking up the
+     * class hierarchy (exact match first, then superclasses up to
+     * {@link Throwable}). Returns {@code null} if none is registered.
      */
     public ErrorPage findErrorPageForException(Throwable exception) {
         Class<?> type = exception.getClass();
@@ -126,6 +131,7 @@ public class ServletRouter {
     public void addFilter(String path, Filter filter) throws ServletException {
         RegisteredFilter registration = new RegisteredFilter(path, filter, filter.getClass().getClassLoader(), null);
         filterMappings.add(new PathPattern<>(path, registration));
+        invalidateDispatchCaches();
         initializeFilterIfNeeded(registration);
     }
 
@@ -139,6 +145,7 @@ public class ServletRouter {
                 filter.getClass().getClassLoader(),
                 null);
         filterMappings.add(new PathPattern<>(pattern, registration));
+        invalidateDispatchCaches();
         initializeFilterIfNeeded(registration);
     }
 
@@ -179,6 +186,7 @@ public class ServletRouter {
         }
 
         deployments.put(webApp.appName(), deployment);
+        invalidateDispatchCaches();
     }
 
     public synchronized boolean undeployWebApp(String appName) {
@@ -201,6 +209,7 @@ public class ServletRouter {
                 destroyServletIfNeeded(removed);
             }
         }
+        invalidateDispatchCaches();
         return true;
     }
 
@@ -221,6 +230,7 @@ public class ServletRouter {
         if (!initialized) {
             return;
         }
+        invalidateDispatchCaches();
         List<RegisteredFilter> filters = uniqueFilters();
         for (int index = filters.size() - 1; index >= 0; index--) {
             destroyFilterIfNeeded(filters.get(index));
@@ -237,23 +247,35 @@ public class ServletRouter {
      * Resolve servlet and matching filters for request path.
      */
     public DispatchTarget resolve(String requestPath) {
-        byte[] requestPathAscii = asciiBytes(requestPath);
-
         // Try exact match first (fastest)
         RegisteredServlet registration = exactMappings.get(requestPath);
-        if (registration == null) {
-            for (PathPattern<RegisteredServlet> pattern : patternMappings) {
-                if (pattern.matches(requestPath, requestPathAscii)) {
-                    registration = pattern.target;
-                    break;
-                }
+        if (registration != null) {
+            DispatchTarget cached = exactDispatchCache.get(requestPath);
+            if (cached != null) {
+                return cached;
+            }
+
+            byte[] requestPathAscii = asciiBytes(requestPath);
+            DispatchTarget computed = buildDispatchTarget(registration, requestPath, requestPathAscii);
+            DispatchTarget previous = exactDispatchCache.putIfAbsent(requestPath, computed);
+            return previous != null ? previous : computed;
+        }
+
+        byte[] requestPathAscii = asciiBytes(requestPath);
+
+        for (PathPattern<RegisteredServlet> pattern : patternMappings) {
+            if (pattern.matches(requestPath, requestPathAscii)) {
+                return buildDispatchTarget(pattern.target, requestPath, requestPathAscii);
             }
         }
 
-        if (registration == null) {
-            return null;
-        }
+        return null;
+    }
 
+    private DispatchTarget buildDispatchTarget(
+            RegisteredServlet registration,
+            String requestPath,
+            byte[] requestPathAscii) {
         List<Filter> filters = new ArrayList<>();
         for (PathPattern<RegisteredFilter> pattern : filterMappings) {
             if (pattern.matches(requestPath, requestPathAscii)) {
@@ -265,6 +287,10 @@ public class ServletRouter {
                 registration.servlet,
                 Collections.unmodifiableList(filters),
                 registration.contextClassLoader);
+    }
+
+    private void invalidateDispatchCaches() {
+        exactDispatchCache.clear();
     }
 
     public WebSocketEndpointMatch resolveWebSocketEndpoint(String requestPath) {
@@ -284,7 +310,8 @@ public class ServletRouter {
     }
 
     private record RegisteredWebSocketTemplate(WebSocketPathTemplate template, WebSocketEndpointMetadata metadata) {
-        private RegisteredWebSocketTemplate {
+
+        private RegisteredWebSocketTemplate  {
             Objects.requireNonNull(template, "template");
             Objects.requireNonNull(metadata, "metadata");
         }
@@ -358,6 +385,7 @@ public class ServletRouter {
     }
 
     public record DispatchTarget(HttpServlet servlet, List<Filter> filters, ClassLoader contextClassLoader) {
+
     }
 
     private static String normalizeContextPath(String contextPath) {
@@ -466,6 +494,7 @@ public class ServletRouter {
     }
 
     private static final class RegisteredServlet {
+
         private final String name;
         private final HttpServlet servlet;
         private final ClassLoader contextClassLoader;
@@ -482,6 +511,7 @@ public class ServletRouter {
     }
 
     private static final class RegisteredFilter {
+
         private final String name;
         private final Filter filter;
         private final ClassLoader contextClassLoader;
@@ -498,6 +528,7 @@ public class ServletRouter {
     }
 
     private static final class DeploymentRegistration {
+
         private final String appName;
         private final String contextPath;
         private final ClassLoader classLoader;
@@ -514,6 +545,7 @@ public class ServletRouter {
     }
 
     private static final class BasicServletConfig implements ServletConfig {
+
         private final String servletName;
         private final Map<String, String> initParameters;
 
@@ -544,6 +576,7 @@ public class ServletRouter {
     }
 
     private static final class BasicFilterConfig implements FilterConfig {
+
         private final String filterName;
         private final Map<String, String> initParameters;
 
@@ -577,6 +610,7 @@ public class ServletRouter {
      * Path pattern matching.
      */
     private static class PathPattern<T> {
+
         private final String pattern;
         private final T target;
         private final boolean isWildcard;

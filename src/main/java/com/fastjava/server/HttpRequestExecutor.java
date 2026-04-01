@@ -1,32 +1,35 @@
 package com.fastjava.server;
 
-import com.fastjava.http.impl.DefaultHttpServletRequest;
-import com.fastjava.http.impl.DefaultHttpServletResponse;
-import com.fastjava.http.parser.ParsedHttpRequest;
-import com.fastjava.sse.SseEmitter;
-import com.fastjava.sse.SseSupport;
-import com.fastjava.server.session.InMemorySessionManager;
-import com.fastjava.server.session.SessionConfig;
-import com.fastjava.server.session.SessionManager;
-import com.fastjava.servlet.Filter;
-import com.fastjava.servlet.FilterChain;
-import com.fastjava.servlet.AsyncContext;
-import com.fastjava.servlet.AsyncEvent;
-import com.fastjava.servlet.AsyncListener;
-import com.fastjava.servlet.HttpServlet;
-import com.fastjava.servlet.HttpServletRequest;
-import com.fastjava.servlet.HttpServletResponse;
-import io.opentelemetry.api.trace.Span;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.fastjava.http.impl.DefaultHttpServletRequest;
+import com.fastjava.http.impl.DefaultHttpServletResponse;
+import com.fastjava.http.parser.ParsedHttpRequest;
+import com.fastjava.server.session.InMemorySessionManager;
+import com.fastjava.server.session.SessionConfig;
+import com.fastjava.server.session.SessionManager;
+import com.fastjava.servlet.AsyncContext;
+import com.fastjava.servlet.AsyncEvent;
+import com.fastjava.servlet.AsyncListener;
+import com.fastjava.servlet.Filter;
+import com.fastjava.servlet.FilterChain;
+import com.fastjava.servlet.HttpServlet;
+import com.fastjava.servlet.HttpServletRequest;
+import com.fastjava.servlet.HttpServletResponse;
+import com.fastjava.sse.SseEmitter;
+import com.fastjava.sse.SseSupport;
+
+import io.opentelemetry.api.trace.Span;
 
 public final class HttpRequestExecutor {
 
@@ -39,8 +42,11 @@ public final class HttpRequestExecutor {
     // performance)
     private static final boolean ACCESS_LOG_ENABLED = Boolean.getBoolean("fastjava.access.log.enabled");
     private static final long DEFAULT_ASYNC_TIMEOUT_MILLIS = 30_000L;
+    // Run explicit maintenance every 1024 requests instead of every request.
+    private static final int MAINTENANCE_INTERVAL_MASK = 1023;
     private static final Logger accessLogger = LoggerFactory.getLogger("com.fastjava.access");
     private static final SessionManager SESSION_MANAGER = new InMemorySessionManager(SessionConfig.defaults());
+    private static final AtomicLong REQUEST_COUNTER = new AtomicLong();
 
     private HttpRequestExecutor() {
     }
@@ -90,7 +96,9 @@ public final class HttpRequestExecutor {
             boolean forceCloseConnection,
             AsyncResponseHandler asyncResponseHandler) {
         long startedAtNanos = System.nanoTime();
-        SESSION_MANAGER.runMaintenance();
+        if ((REQUEST_COUNTER.incrementAndGet() & MAINTENANCE_INTERVAL_MASK) == 0) {
+            SESSION_MANAGER.runMaintenance();
+        }
         DefaultHttpServletRequest request = new DefaultHttpServletRequest(
                 parsed,
                 remoteAddr,
@@ -110,9 +118,12 @@ public final class HttpRequestExecutor {
         if (requestSseEmitter != null) {
             request.setAttribute(SseSupport.REQUEST_ATTRIBUTE, requestSseEmitter);
         }
+        final boolean tracingEnabled = RequestTracing.isEnabled();
         RequestTracing.SpanScope requestSpan = RequestTracing.startServerSpan("http.request");
-        requestSpan.setAttribute("http.method", parsed.getMethod());
-        requestSpan.setAttribute("http.target", parsed.getURI());
+        if (tracingEnabled) {
+            requestSpan.setAttribute("http.method", parsed.getMethod());
+            requestSpan.setAttribute("http.target", parsed.getURI());
+        }
 
         AtomicReference<AsyncExecutionState> asyncStateRef = null;
         if (asyncResponseHandler != null) {
@@ -151,7 +162,11 @@ public final class HttpRequestExecutor {
                 response.getWriter().write(ServerObservability.renderPrometheus());
             } else {
                 ServletRouter.DispatchTarget dispatchTarget;
-                try (RequestTracing.SpanScope ignored = RequestTracing.startChildSpan("http.route.resolve")) {
+                if (tracingEnabled) {
+                    try (RequestTracing.SpanScope ignored = RequestTracing.startChildSpan("http.route.resolve")) {
+                        dispatchTarget = router.resolve(requestPath);
+                    }
+                } else {
                     dispatchTarget = router.resolve(requestPath);
                 }
                 if (dispatchTarget == null) {
@@ -162,7 +177,11 @@ public final class HttpRequestExecutor {
                         response.sendError(404);
                     }
                 } else {
-                    try (RequestTracing.SpanScope ignored = RequestTracing.startChildSpan("http.filter.chain")) {
+                    if (tracingEnabled) {
+                        try (RequestTracing.SpanScope ignored = RequestTracing.startChildSpan("http.filter.chain")) {
+                            invokeDispatchTarget(dispatchTarget, request, response);
+                        }
+                    } else {
                         invokeDispatchTarget(dispatchTarget, request, response);
                     }
                 }
@@ -275,7 +294,12 @@ public final class HttpRequestExecutor {
             currentThread.setContextClassLoader(targetClassLoader);
         }
         try {
-            new DefaultFilterChain(dispatchTarget.filters(), dispatchTarget.servlet()).doFilter(request, response);
+            List<Filter> filters = dispatchTarget.filters();
+            if (filters.isEmpty()) {
+                invokeServlet(dispatchTarget.servlet(), request, response);
+                return;
+            }
+            new DefaultFilterChain(filters, dispatchTarget.servlet()).doFilter(request, response);
         } finally {
             if (switchClassLoader) {
                 currentThread.setContextClassLoader(previousClassLoader);
@@ -283,7 +307,21 @@ public final class HttpRequestExecutor {
         }
     }
 
+    private static void invokeServlet(HttpServlet servlet, HttpServletRequest request, HttpServletResponse response)
+            throws com.fastjava.servlet.ServletException {
+        if (RequestTracing.isEnabled()) {
+            try (RequestTracing.SpanScope ignored = RequestTracing.startChildSpan("http.servlet.service")) {
+                servlet.service(request, response);
+            }
+            return;
+        }
+        servlet.service(request, response);
+    }
+
     private static boolean isSseResponse(DefaultHttpServletResponse response) {
+        if (response.getStatus() >= 400) {
+            return false;
+        }
         String contentType = response.getContentType();
         if (contentType == null) {
             return false;
@@ -294,6 +332,7 @@ public final class HttpRequestExecutor {
     }
 
     public interface AsyncResponseHandler {
+
         void onComplete(HttpExecutionResult result);
 
         ScheduledFuture<?> scheduleTimeout(Runnable task, long timeoutMillis);
@@ -302,6 +341,7 @@ public final class HttpRequestExecutor {
     }
 
     private static final class AsyncExecutionState {
+
         private final DefaultHttpServletRequest request;
         private final DefaultHttpServletResponse response;
         private final ParsedHttpRequest parsed;
@@ -526,6 +566,7 @@ public final class HttpRequestExecutor {
     }
 
     private static final class AsyncContextImpl implements AsyncContext {
+
         private final AsyncExecutionState state;
 
         private AsyncContextImpl(AsyncExecutionState state) {
@@ -613,6 +654,7 @@ public final class HttpRequestExecutor {
     }
 
     private static final class DefaultFilterChain implements FilterChain {
+
         private final List<Filter> filters;
         private final HttpServlet servlet;
         private int index;
@@ -630,9 +672,7 @@ public final class HttpRequestExecutor {
                 filter.doFilter(request, response, this);
                 return;
             }
-            try (RequestTracing.SpanScope ignored = RequestTracing.startChildSpan("http.servlet.service")) {
-                servlet.service(request, response);
-            }
+            invokeServlet(servlet, request, response);
         }
     }
 }

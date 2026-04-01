@@ -22,7 +22,7 @@
 Param(
     [ValidateSet("FastJava", "Undertow", "Tomcat", "Netty")]
     [string]$ServerName = "FastJava",
-    [int]$RequestCount = 100000,
+    [int]$RequestCount = 1000000,
     [int]$Concurrency = 32,
     [int]$JfrDuration = 40,
     [string]$OutputDir = "target/profiles/jfr-data"
@@ -102,7 +102,8 @@ try {
     $output = & jcmd $procId GC.class_histogram 2>&1
     $output | Out-File -FilePath $heapFile -Encoding utf8
     Write-Host "Heap saved: $heapFile"
-} catch {
+}
+catch {
     Write-Host "Could not capture heap"
 }
 
@@ -125,3 +126,11 @@ Write-Host "Output: $profileDir"
 Write-Host ""
 Get-ChildItem -Path $profileDir
 Write-Host ""
+
+$summaryScript = Join-Path $PSScriptRoot "jfr-summary.ps1"
+if (Test-Path $summaryScript) {
+    Write-Host "Generating JFR summary..."
+    & $summaryScript -JfrFile $jfrFile -TopN 10
+} else {
+    Write-Host "jfr-summary.ps1 not found, skipping summary generation"
+}

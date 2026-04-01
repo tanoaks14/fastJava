@@ -1,36 +1,8 @@
 package com.fastjava.server;
 
-import com.fastjava.http.h2.HpackCodec;
-import com.fastjava.http.h2.Http2FrameCodec;
-import com.fastjava.http.parser.HttpRequestParser;
-import com.fastjava.http.parser.ParsedHttpRequest;
-import com.fastjava.http.simd.SIMDByteScanner;
-import com.fastjava.sse.NioSseEmitter;
-import com.fastjava.server.config.Http2Config;
-import com.fastjava.server.tls.SslContextFactory;
-import com.fastjava.server.tls.TlsChannelHandler;
-import com.fastjava.server.tls.TlsConfig;
-import com.fastjava.websocket.WebSocketEndpointBinding;
-import com.fastjava.websocket.WebSocketEndpointMatch;
-import com.fastjava.websocket.WebSocketEndpointMetadata;
-import com.fastjava.websocket.WebSocketExtensions;
-import com.fastjava.websocket.WebSocketFrame;
-import com.fastjava.websocket.WebSocketFrameCodec;
-import com.fastjava.websocket.WebSocketHandshake;
-import com.fastjava.websocket.WebSocketSession;
-import com.fastjava.servlet.Filter;
-import com.fastjava.servlet.HttpServlet;
-import com.fastjava.servlet.ServletException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLEngine;
-import javax.net.ssl.SSLParameters;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
-import java.nio.charset.StandardCharsets;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedSelectorException;
 import java.nio.channels.FileChannel;
@@ -38,6 +10,7 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -51,7 +24,6 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -60,17 +32,54 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.fastjava.http.h2.HpackCodec;
+import com.fastjava.http.h2.Http2FrameCodec;
+import com.fastjava.http.parser.HttpRequestParser;
+import com.fastjava.http.parser.ParsedHttpRequest;
+import com.fastjava.http.response.HttpResponseBuilder;
+import com.fastjava.http.simd.SIMDByteScanner;
+import com.fastjava.server.config.Http2Config;
+import com.fastjava.server.tls.SslContextFactory;
+import com.fastjava.server.tls.TlsChannelHandler;
+import com.fastjava.server.tls.TlsConfig;
+import com.fastjava.servlet.Filter;
+import com.fastjava.servlet.HttpServlet;
+import com.fastjava.servlet.ServletException;
+import com.fastjava.sse.NioSseEmitter;
+import com.fastjava.websocket.WebSocketEndpointBinding;
+import com.fastjava.websocket.WebSocketEndpointMatch;
+import com.fastjava.websocket.WebSocketEndpointMetadata;
+import com.fastjava.websocket.WebSocketExtensions;
+import com.fastjava.websocket.WebSocketFrame;
+import com.fastjava.websocket.WebSocketFrameCodec;
+import com.fastjava.websocket.WebSocketHandshake;
+import com.fastjava.websocket.WebSocketSession;
 
 public class FastJavaNioServer {
 
     private static final Logger logger = LoggerFactory.getLogger(FastJavaNioServer.class);
-    // Configurable via -Dfastjava.sse.skip=true to skip SSE emitter creation for
-    // non-SSE workloads
+    // Configurable via -Dfastjava.sse.skip=true to disable SSE emitter creation
+    // entirely.
+    // Even when enabled, emitter setup is only done for SSE requests.
     private static final boolean SSE_EAGER = !Boolean.getBoolean("fastjava.sse.skip");
+    // Configurable via -Dfastjava.inline.requests=true to execute servlet logic
+    // on the selector thread and avoid worker handoff overhead.
+    private static final boolean INLINE_REQUEST_EXECUTION = Boolean.getBoolean("fastjava.inline.requests");
     private static final boolean VIRTUAL_THREADS = Boolean.getBoolean("fastjava.virtual.threads.enabled");
+            // 0 means unbounded (legacy behavior). Set >0 to cap per-loop completion drain.
+            private static final int COMPLETION_DRAIN_BATCH =
+                Integer.getInteger("fastjava.selector.completion.drain.batch", 0);
     private static final int GATHER_WRITE_BATCH_SIZE = 16;
     private static final int SMALL_RESPONSE_COALESCE_BYTES = 1024;
     private static final int MAX_WEBSOCKET_PAYLOAD_BYTES = 64 * 1024;
@@ -90,9 +99,9 @@ public class FastJavaNioServer {
     private static final int HTTP2_SETTINGS_MAX_HEADER_LIST_SIZE = 0x6;
     private static final int HTTP2_DEFAULT_INITIAL_WINDOW_SIZE = 65_535;
     private static final int HTTP2_WINDOW_UPDATE_THRESHOLD = 32_768;
-    private static final byte[] H2C_PREFACE = new byte[] {
-            'P', 'R', 'I', ' ', '*', ' ', 'H', 'T', 'T', 'P', '/', '2', '.', '0', '\r', '\n',
-            '\r', '\n', 'S', 'M', '\r', '\n', '\r', '\n'
+    private static final byte[] H2C_PREFACE = new byte[]{
+        'P', 'R', 'I', ' ', '*', ' ', 'H', 'T', 'T', 'P', '/', '2', '.', '0', '\r', '\n',
+        '\r', '\n', 'S', 'M', '\r', '\n', '\r', '\n'
     };
 
     private final int port;
@@ -104,8 +113,10 @@ public class FastJavaNioServer {
     private final ScheduledExecutorService asyncTimeoutExecutor;
     private final ConcurrentLinkedQueue<NioCompletion> completionQueue;
     private final ConcurrentLinkedQueue<Runnable> selectorTasks;
+    private final Map<String, StaticRouteResponse> staticResponses;
     private final int maxWriteBytesPerOperation;
     private final java.util.concurrent.atomic.AtomicLong writeTimeoutCloseCount;
+    private final AtomicBoolean wakeupPending = new AtomicBoolean(false);
     private volatile boolean running;
     private final TlsConfig tlsConfig;
     private final Http2Config http2Config;
@@ -114,6 +125,9 @@ public class FastJavaNioServer {
     private long tlsKeystoreLastModifiedMillis = -1L;
     private long tlsTruststoreLastModifiedMillis = -1L;
     private long lastTlsReloadCheckMillis = 0L;
+    private long lastIdleCheckMillis = 0L;
+    // Check for idle/timed-out connections at most once per second (not every selector loop).
+    private static final long IDLE_CHECK_INTERVAL_MS = 200L;
 
     private Selector selector;
     private ServerSocketChannel serverSocketChannel;
@@ -180,6 +194,7 @@ public class FastJavaNioServer {
         this.stopRequested = new AtomicBoolean(false);
         this.completionQueue = new ConcurrentLinkedQueue<>();
         this.selectorTasks = new ConcurrentLinkedQueue<>();
+        this.staticResponses = new java.util.concurrent.ConcurrentHashMap<>();
         this.pendingTlsRegistrations = new ConcurrentLinkedQueue<>();
         this.maxWriteBytesPerOperation = maxWriteBytesPerOperation;
         this.writeTimeoutCloseCount = new java.util.concurrent.atomic.AtomicLong();
@@ -224,6 +239,38 @@ public class FastJavaNioServer {
     }
 
     /**
+     * Registers an exact GET route with a prebuilt text/plain response. This
+     * bypasses servlet/filter/async execution for matching requests.
+     */
+    public void addStaticPlainTextRoute(String path, String body) {
+        byte[] payload = body == null ? new byte[0] : body.getBytes(StandardCharsets.US_ASCII);
+        addStaticResponse("GET", path, "text/plain", payload);
+    }
+
+    public void addStaticResponse(String method, String path, String contentType, byte[] bodyBytes) {
+        String normalizedPath = normalizeStaticPath(path);
+        String normalizedMethod = method == null ? "GET" : method.trim().toUpperCase(java.util.Locale.ROOT);
+        byte[] payload = bodyBytes == null ? new byte[0] : Arrays.copyOf(bodyBytes, bodyBytes.length);
+        String type = contentType == null || contentType.isBlank() ? "application/octet-stream" : contentType;
+
+        HttpResponseBuilder keepAliveBuilder = new HttpResponseBuilder(256);
+        keepAliveBuilder.setStatus(200)
+                .setContentType(type)
+                .setHeader("Connection", "keep-alive")
+                .setBody(payload);
+
+        HttpResponseBuilder closeBuilder = new HttpResponseBuilder(256);
+        closeBuilder.setStatus(200)
+                .setContentType(type)
+                .setHeader("Connection", "close")
+                .setBody(payload);
+
+        staticResponses.put(
+                staticRouteKey(normalizedMethod, normalizedPath),
+                new StaticRouteResponse(keepAliveBuilder.build(), closeBuilder.build()));
+    }
+
+    /**
      * Register an annotation-based WebSocket endpoint.
      */
     public void addWebSocketEndpoint(Class<?> endpointClass) {
@@ -258,7 +305,8 @@ public class FastJavaNioServer {
         selector = Selector.open();
         serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.configureBlocking(false);
-        serverSocketChannel.bind(new InetSocketAddress(port));
+        // Increase backlog to handle bursty connection acceptance
+        serverSocketChannel.bind(new InetSocketAddress(port), 512);
         serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
         running = true;
 
@@ -324,11 +372,18 @@ public class FastJavaNioServer {
     private void runLoop() {
         try {
             while (running) {
-                selector.select(100);
+                // Skip blocking select() when completions or tasks are already queued —
+                // avoids the wakeup-overhead and latency of waiting unnecessarily.
+                if (completionQueue.isEmpty() && selectorTasks.isEmpty() && pendingTlsRegistrations.isEmpty()) {
+                    selector.select(100);
+                } else {
+                    selector.selectNow();
+                }
+                wakeupPending.set(false);
                 maybeHotReloadTlsCertificates();
                 drainPendingTlsRegistrations();
                 drainSelectorTasks();
-                applyCompletedExecutions();
+                applyCompletedExecutions(COMPLETION_DRAIN_BATCH);
                 expireIdleConnections();
                 Set<SelectionKey> selectedKeys = selector.selectedKeys();
                 Iterator<SelectionKey> iterator = selectedKeys.iterator();
@@ -409,7 +464,20 @@ public class FastJavaNioServer {
 
     private void submitSelectorTask(Runnable task) {
         selectorTasks.offer(task);
-        selector.wakeup();
+        requestSelectorWakeup();
+    }
+
+    private boolean isSelectorThread() {
+        return Thread.currentThread() == selectorThread;
+    }
+
+    private void requestSelectorWakeup() {
+        if (selector == null || isSelectorThread()) {
+            return;
+        }
+        if (wakeupPending.compareAndSet(false, true)) {
+            selector.wakeup();
+        }
     }
 
     private void acceptConnection() throws IOException {
@@ -478,8 +546,10 @@ public class FastJavaNioServer {
             params.setProtocols(tlsConfig.protocols());
             params.setApplicationProtocols(tlsConfig.applicationProtocols());
             switch (tlsConfig.clientAuthMode()) {
-                case NEED -> params.setNeedClientAuth(true);
-                case WANT -> params.setWantClientAuth(true);
+                case NEED ->
+                    params.setNeedClientAuth(true);
+                case WANT ->
+                    params.setWantClientAuth(true);
                 case NONE -> {
                     // default server-auth only mode
                 }
@@ -488,7 +558,7 @@ public class FastJavaNioServer {
             TlsChannelHandler handler = new TlsChannelHandler(channel, engine);
             handler.doHandshake();
             pendingTlsRegistrations.offer(handler);
-            selector.wakeup();
+            requestSelectorWakeup();
         } catch (Exception exception) {
             logger.warn("TLS handshake failed for {}: {}", channel, exception.getMessage());
             try {
@@ -716,12 +786,18 @@ public class FastJavaNioServer {
             return false;
         }
         return switch (frame.type()) {
-            case Http2FrameCodec.TYPE_SETTINGS -> handleHttp2SettingsFrame(key, connection, frame);
-            case Http2FrameCodec.TYPE_HEADERS -> handleHttp2HeadersFrame(key, connection, frame);
-            case Http2FrameCodec.TYPE_DATA -> handleHttp2DataFrame(key, connection, frame);
-            case Http2FrameCodec.TYPE_PING -> handleHttp2PingFrame(key, connection, frame);
-            case Http2FrameCodec.TYPE_CONTINUATION -> handleHttp2ContinuationFrame(key, connection, frame);
-            case Http2FrameCodec.TYPE_WINDOW_UPDATE -> handleHttp2WindowUpdateFrame(key, connection, frame);
+            case Http2FrameCodec.TYPE_SETTINGS ->
+                handleHttp2SettingsFrame(key, connection, frame);
+            case Http2FrameCodec.TYPE_HEADERS ->
+                handleHttp2HeadersFrame(key, connection, frame);
+            case Http2FrameCodec.TYPE_DATA ->
+                handleHttp2DataFrame(key, connection, frame);
+            case Http2FrameCodec.TYPE_PING ->
+                handleHttp2PingFrame(key, connection, frame);
+            case Http2FrameCodec.TYPE_CONTINUATION ->
+                handleHttp2ContinuationFrame(key, connection, frame);
+            case Http2FrameCodec.TYPE_WINDOW_UPDATE ->
+                handleHttp2WindowUpdateFrame(key, connection, frame);
             case Http2FrameCodec.TYPE_RST_STREAM -> {
                 connection.removeHttp2Stream(frame.streamId());
                 yield true;
@@ -1372,8 +1448,8 @@ public class FastJavaNioServer {
                 + "Connection: Upgrade\r\n"
                 + "Upgrade: h2c\r\n"
                 + "\r\n").getBytes(StandardCharsets.US_ASCII);
+        connection.markPendingH2cUpgrade(settingsPayload); // must be set before queueResponse in case of inline write
         queueResponse(key, connection, upgradeResponse, false);
-        connection.markPendingH2cUpgrade(settingsPayload);
         return true;
     }
 
@@ -1476,7 +1552,7 @@ public class FastJavaNioServer {
 
     private void queueHttp2Frame(SelectionKey key, NioConnection connection, byte[] frameBytes,
             boolean closeAfterWrite) {
-        queueResponse(key, connection, new ByteBuffer[] { ByteBuffer.wrap(frameBytes) }, closeAfterWrite);
+        queueResponse(key, connection, new ByteBuffer[]{ByteBuffer.wrap(frameBytes)}, closeAfterWrite);
     }
 
     private void processBufferedRequest(SelectionKey key, NioConnection connection) throws IOException {
@@ -1531,8 +1607,8 @@ public class FastJavaNioServer {
             if (!connection.continueSentForCurrentRequest()
                     && HttpRequestInspector.shouldSendContinue(connection.buffer(), connection.bufferedBytes(),
                             requestLimits)) {
+                connection.markContinueSent(); // must be set before queueResponse in case of inline write
                 queueResponse(key, connection, SimpleHttpResponses.provisionalContinue(), false);
-                connection.markContinueSent();
             }
             return;
         }
@@ -1600,10 +1676,28 @@ public class FastJavaNioServer {
             return;
         }
 
+        StaticRouteResponse staticResponse = resolveStaticResponse(parsed);
+        if (staticResponse != null) {
+            ServerObservability.recordRequestBytesReceived(parsed.bytesConsumed);
+            connection.consume(parsed.bytesConsumed);
+            boolean closeAfterWrite = parsed.closeAfterResponse();
+            enqueueImmediateCompletion(
+                    key,
+                    connection,
+                    requestSequence,
+                    staticResponse.response(closeAfterWrite),
+                    closeAfterWrite);
+            return;
+        }
+
         ServerObservability.recordRequestBytesReceived(parsed.bytesConsumed);
         connection.consume(parsed.bytesConsumed);
         connection.markRequestReady();
         connection.markExecuting();
+        if (INLINE_REQUEST_EXECUTION) {
+            executeRequestAsync(key, connection, parsed, requestSequence);
+            return;
+        }
         try {
             workerExecutor.execute(() -> executeRequestAsync(key, connection, parsed, requestSequence));
         } catch (RejectedExecutionException exception) {
@@ -1650,8 +1744,10 @@ public class FastJavaNioServer {
 
     private boolean handleWebSocketFrame(SelectionKey key, NioConnection connection, WebSocketFrame frame) {
         return switch (frame.opcode()) {
-            case WebSocketFrameCodec.OPCODE_TEXT -> handleWebSocketTextFrame(key, connection, frame);
-            case WebSocketFrameCodec.OPCODE_CONTINUATION -> handleWebSocketContinuationFrame(key, connection, frame);
+            case WebSocketFrameCodec.OPCODE_TEXT ->
+                handleWebSocketTextFrame(key, connection, frame);
+            case WebSocketFrameCodec.OPCODE_CONTINUATION ->
+                handleWebSocketContinuationFrame(key, connection, frame);
             case WebSocketFrameCodec.OPCODE_BINARY -> {
                 WebSocketEndpointBinding endpointBinding = connection.webSocketEndpointBinding();
                 if (endpointBinding == null) {
@@ -1671,7 +1767,8 @@ public class FastJavaNioServer {
                 queueWebSocketFrame(key, connection, WebSocketFrameCodec.OPCODE_PONG, frame.payload(), false);
                 yield true;
             }
-            case WebSocketFrameCodec.OPCODE_PONG -> true;
+            case WebSocketFrameCodec.OPCODE_PONG ->
+                true;
             case WebSocketFrameCodec.OPCODE_CLOSE -> {
                 WebSocketEndpointBinding endpointBinding = connection.webSocketEndpointBinding();
                 if (endpointBinding != null) {
@@ -1762,33 +1859,33 @@ public class FastJavaNioServer {
                 connection.remoteAddressSafely(),
                 negotiatedSubprotocol,
                 new WebSocketSession.Transport() {
-                    @Override
-                    public void sendText(String message) {
-                        queueWebSocketFrame(
-                                key,
-                                connection,
-                                WebSocketFrameCodec.OPCODE_TEXT,
-                                message.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                                false,
-                                perMessageDeflateEnabled);
-                    }
+            @Override
+            public void sendText(String message) {
+                queueWebSocketFrame(
+                        key,
+                        connection,
+                        WebSocketFrameCodec.OPCODE_TEXT,
+                        message.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                        false,
+                        perMessageDeflateEnabled);
+            }
 
-                    @Override
-                    public void sendBinary(byte[] payload) {
-                        queueWebSocketFrame(
-                                key,
-                                connection,
-                                WebSocketFrameCodec.OPCODE_BINARY,
-                                payload,
-                                false,
-                                perMessageDeflateEnabled);
-                    }
+            @Override
+            public void sendBinary(byte[] payload) {
+                queueWebSocketFrame(
+                        key,
+                        connection,
+                        WebSocketFrameCodec.OPCODE_BINARY,
+                        payload,
+                        false,
+                        perMessageDeflateEnabled);
+            }
 
-                    @Override
-                    public void close(int code) {
-                        sendWebSocketClose(key, connection, code, true);
-                    }
-                });
+            @Override
+            public void close(int code) {
+                sendWebSocketClose(key, connection, code, true);
+            }
+        });
         return new WebSocketEndpointBinding(endpointMetadata, session, pathParams);
     }
 
@@ -1846,6 +1943,41 @@ public class FastJavaNioServer {
         return queryStart >= 0 ? requestUri.substring(0, queryStart) : requestUri;
     }
 
+    private StaticRouteResponse resolveStaticResponse(ParsedHttpRequest parsed) {
+        if (parsed == null) {
+            return null;
+        }
+        if (parsed.bodyLength > 0) {
+            return null;
+        }
+        if (parsed.getHeader("Upgrade") != null) {
+            return null;
+        }
+
+        String method = parsed.getMethod();
+        String path = extractRequestPath(parsed.getURI());
+        return staticResponses.get(staticRouteKey(method, path));
+    }
+
+    private static String staticRouteKey(String method, String path) {
+        String normalizedMethod = method == null ? "GET" : method.trim().toUpperCase(java.util.Locale.ROOT);
+        return normalizedMethod + " " + normalizeStaticPath(path);
+    }
+
+    private static String normalizeStaticPath(String path) {
+        if (path == null || path.isBlank()) {
+            return "/";
+        }
+        return path.charAt(0) == '/' ? path : "/" + path;
+    }
+
+    private record StaticRouteResponse(byte[] keepAliveResponse, byte[] closeResponse) {
+
+        private byte[] response(boolean closeAfterWrite) {
+            return closeAfterWrite ? closeResponse : keepAliveResponse;
+        }
+    }
+
     private void sendWebSocketClose(SelectionKey key, NioConnection connection, int closeCode,
             boolean closeAfterWrite) {
         byte[] closePayload = WebSocketFrameCodec.closePayload(closeCode);
@@ -1898,7 +2030,7 @@ public class FastJavaNioServer {
                 @Override
                 public void onComplete(HttpExecutionResult result) {
                     completionQueue.add(NioCompletion.success(key, requestSequence, result));
-                    selector.wakeup();
+                    requestSelectorWakeup();
                 }
 
                 @Override
@@ -1917,7 +2049,7 @@ public class FastJavaNioServer {
             final int remotePort = connection.remotePort();
             final int localPort = connection.localPort();
             final boolean tlsEnabled = connection.isTlsEnabled();
-            if (SSE_EAGER) {
+            if (sseEmitter != null) {
                 executionResult = SseRuntime.callWithEmitter(sseEmitter, () -> HttpRequestExecutor.execute(
                         parsed, router, remoteAddr, remotePort,
                         localPort, requestLimits, tlsEnabled, false, asyncHandler));
@@ -1938,9 +2070,10 @@ public class FastJavaNioServer {
                             SimpleHttpResponses.plainText(500, "Internal Server Error"),
                             true));
         } finally {
-            selector.wakeup();
+            requestSelectorWakeup();
         }
     }
+
 
     private NioSseEmitter createNioSseEmitter(SelectionKey key, NioConnection connection) {
         return new NioSseEmitter((payload, closeAfterWrite) -> submitSelectorTask(() -> {
@@ -1950,15 +2083,18 @@ public class FastJavaNioServer {
             if (closeAfterWrite) {
                 connection.disableSseStreaming();
             }
-            queueResponse(key, connection, new ByteBuffer[] { ByteBuffer.wrap(payload) }, closeAfterWrite);
+            queueResponse(key, connection, new ByteBuffer[]{ByteBuffer.wrap(payload)}, closeAfterWrite);
         }));
     }
 
-    private void applyCompletedExecutions() {
+    private void applyCompletedExecutions(int maxCompletions) {
+        int processed = 0;
         NioCompletion completion;
-        while ((completion = completionQueue.poll()) != null) {
+        while ((maxCompletions <= 0 || processed < maxCompletions)
+                && (completion = completionQueue.poll()) != null) {
             SelectionKey key = completion.key();
             if (key == null || !key.isValid()) {
+                processed++;
                 continue;
             }
 
@@ -1966,6 +2102,7 @@ public class FastJavaNioServer {
             connection.markResponseReady();
             connection.enqueueCompletedResponse(completion);
             drainCompletedResponsesInOrder(key, connection);
+            processed++;
         }
     }
 
@@ -1998,12 +2135,15 @@ public class FastJavaNioServer {
 
     private void queueResponse(SelectionKey key, NioConnection connection, byte[] responseBytes,
             boolean closeAfterWrite) {
-        queueResponse(key, connection, new ByteBuffer[] { ByteBuffer.wrap(responseBytes) }, closeAfterWrite);
+        queueResponse(key, connection, new ByteBuffer[]{ByteBuffer.wrap(responseBytes)}, closeAfterWrite);
     }
 
     private void queueResponse(SelectionKey key, NioConnection connection, ByteBuffer[] responseSegments,
             boolean closeAfterWrite) {
         connection.prepareWrite(responseSegments, null, closeAfterWrite);
+        if (attemptInlineWrite(key, connection)) {
+            return;
+        }
         key.interestOps(SelectionKey.OP_WRITE);
         selector.wakeup();
     }
@@ -2011,12 +2151,68 @@ public class FastJavaNioServer {
     private void queueResponse(SelectionKey key, NioConnection connection, HttpExecutionResult executionResult,
             boolean closeAfterWrite) {
         connection.prepareWrite(executionResult.responseBuffers(), executionResult.fileBody(), closeAfterWrite);
+        if (attemptInlineWrite(key, connection)) {
+            return;
+        }
         key.interestOps(SelectionKey.OP_WRITE);
         selector.wakeup();
     }
 
+    /**
+     * Attempts a non-blocking write inline when already on the selector thread,
+     * eliminating the OP_WRITE interest-registration + extra selector iteration
+     * that would otherwise be needed for every response. For small keep-alive
+     * responses, the TCP send buffer is almost always available, so the write
+     * succeeds without a partial-write fall-through.
+     *
+     * @return true  if a write attempt was made (caller must NOT arm OP_WRITE)
+     *         false if not on selector thread (caller should fall back to OP_WRITE)
+     */
+    private boolean attemptInlineWrite(SelectionKey key, NioConnection connection) {
+        if (!isSelectorThread()) {
+            return false;
+        }
+        try {
+            int written = connection.writeToChannel(maxWriteBytesPerOperation);
+            if (written > 0) {
+                connection.touch();
+            }
+        } catch (IOException e) {
+            closeKey(key);
+            return true;
+        }
+        if (connection.hasPendingWrite()) {
+            // Partial write: arm OP_WRITE but skip wakeup — selector thread will pick it up.
+            key.interestOps(SelectionKey.OP_WRITE);
+            return true;
+        }
+        if (connection.hasPendingH2cUpgrade()) {
+            activatePendingH2cUpgrade(key, connection);
+            return true;
+        }
+        if (connection.shouldCloseAfterWrite()) {
+            connection.markClosing();
+            closeKey(key);
+            return true;
+        }
+        connection.markIdle();
+        key.interestOps(SelectionKey.OP_READ);
+        if (connection.bufferedBytes() > 0) {
+            try {
+                processBufferedData(key, connection);
+            } catch (IOException e) {
+                closeKey(key);
+            }
+        }
+        return true;
+    }
+
     private void expireIdleConnections() {
         long now = System.currentTimeMillis();
+        if (now - lastIdleCheckMillis < IDLE_CHECK_INTERVAL_MS) {
+            return;
+        }
+        lastIdleCheckMillis = now;
         for (SelectionKey key : selector.keys()) {
             if (!(key.attachment() instanceof NioConnection connection)) {
                 continue;
@@ -2070,6 +2266,7 @@ public class FastJavaNioServer {
     }
 
     private static final class NioConnection {
+
         private enum ProtocolMode {
             HTTP1,
             HTTP2,
@@ -2106,7 +2303,9 @@ public class FastJavaNioServer {
         private long pendingFilePosition;
         private long pendingFileRemaining;
         private FileChannel pendingFileChannel;
-        /** Lazily allocated 8 KiB chunk buffer used when sending files over TLS. */
+        /**
+         * Lazily allocated 8 KiB chunk buffer used when sending files over TLS.
+         */
         private ByteBuffer tlsFileChunk;
         private State state;
         private long lastActivityTimeMillis;
@@ -3028,6 +3227,7 @@ public class FastJavaNioServer {
     }
 
     private static final class Http2StreamState {
+
         private final int streamId;
         private final java.io.ByteArrayOutputStream body;
         private final java.io.ByteArrayOutputStream headerBlock;
@@ -3178,9 +3378,11 @@ public class FastJavaNioServer {
     }
 
     private record Http2QueuedData(int streamId, byte[] payload, int flags) {
+
     }
 
     private record Http2ResponseParts(int statusCode, Map<String, String> headers, java.io.ByteArrayOutputStream body) {
+
     }
 
     private record NioCompletion(
@@ -3188,6 +3390,7 @@ public class FastJavaNioServer {
             long sequence,
             HttpExecutionResult executionResult,
             boolean closeAfterWrite) {
+
         private static NioCompletion success(SelectionKey key, long sequence, HttpExecutionResult executionResult) {
             return new NioCompletion(key, sequence, executionResult, !executionResult.keepAlive());
         }
@@ -3201,8 +3404,8 @@ public class FastJavaNioServer {
             return new NioCompletion(
                     key,
                     sequence,
-                    new HttpExecutionResult(new byte[][] { responseBytes }, null, !closeAfterWrite, statusCode,
-                            responseBytes == null ? 0 : responseBytes.length, false, null),
+                    new HttpExecutionResult(new byte[][]{responseBytes}, null, !closeAfterWrite, statusCode,
+                    responseBytes == null ? 0 : responseBytes.length, false, null),
                     closeAfterWrite);
         }
 

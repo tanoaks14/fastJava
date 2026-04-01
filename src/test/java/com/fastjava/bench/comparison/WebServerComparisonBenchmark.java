@@ -1,11 +1,39 @@
 package com.fastjava.bench.comparison;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
+
+import org.apache.catalina.Context;
+import org.apache.catalina.connector.Connector;
+import org.apache.catalina.startup.Tomcat;
+
 import com.fastjava.server.FastJavaNioServer;
 import com.fastjava.server.RequestLimits;
 import com.fastjava.servlet.HttpServlet;
 import com.fastjava.servlet.HttpServletRequest;
 import com.fastjava.servlet.HttpServletResponse;
 import com.fastjava.servlet.ServletException;
+
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -27,31 +55,6 @@ import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpVersion;
 import io.undertow.Undertow;
 import io.undertow.util.Headers;
-import org.apache.catalina.Context;
-import org.apache.catalina.connector.Connector;
-import org.apache.catalina.startup.Tomcat;
-
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Locale;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.LongAdder;
 
 public final class WebServerComparisonBenchmark {
 
@@ -141,11 +144,16 @@ public final class WebServerComparisonBenchmark {
 
     private static BenchServer createServer(String serverName) {
         return switch (serverName) {
-            case "FastJava" -> new FastJavaAdapter();
-            case "Undertow" -> new UndertowAdapter();
-            case "Tomcat" -> new TomcatAdapter();
-            case "Netty" -> new NettyAdapter();
-            default -> throw new IllegalArgumentException("Unknown server: " + serverName);
+            case "FastJava" ->
+                new FastJavaAdapter();
+            case "Undertow" ->
+                new UndertowAdapter();
+            case "Tomcat" ->
+                new TomcatAdapter();
+            case "Netty" ->
+                new NettyAdapter();
+            default ->
+                throw new IllegalArgumentException("Unknown server: " + serverName);
         };
     }
 
@@ -189,16 +197,19 @@ public final class WebServerComparisonBenchmark {
     }
 
     private static BenchmarkResult runLoad(String url, int totalRequests, int concurrency) throws Exception {
+        ExecutorService httpClientExecutor = Executors.newFixedThreadPool(Math.max(4, concurrency));
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3))
                 .version(HttpClient.Version.HTTP_1_1)
+                .executor(httpClientExecutor)
                 .build();
 
         AtomicInteger remaining = new AtomicInteger(totalRequests);
         LongAdder success = new LongAdder();
         LongAdder errors = new LongAdder();
         LongAdder latencyNanosTotal = new LongAdder();
-        List<Long> latencies = java.util.Collections.synchronizedList(new ArrayList<>(totalRequests));
+        AtomicInteger latencyIndex = new AtomicInteger();
+        long[] latencies = new long[totalRequests];
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
@@ -228,7 +239,10 @@ public final class WebServerComparisonBenchmark {
                         } finally {
                             long latency = System.nanoTime() - startNanos;
                             latencyNanosTotal.add(latency);
-                            latencies.add(latency);
+                            int index = latencyIndex.getAndIncrement();
+                            if (index < latencies.length) {
+                                latencies[index] = latency;
+                            }
                         }
                     }
                 } finally {
@@ -240,10 +254,13 @@ public final class WebServerComparisonBenchmark {
         latch.await();
         executor.shutdown();
         executor.awaitTermination(30, TimeUnit.SECONDS);
+        httpClientExecutor.shutdown();
+        httpClientExecutor.awaitTermination(30, TimeUnit.SECONDS);
 
         long elapsedNanos = Duration.between(started, Instant.now()).toNanos();
         long completed = success.sum() + errors.sum();
-        latencies.sort(Long::compareTo);
+        int latencyCount = (int) Math.min(completed, latencies.length);
+        Arrays.sort(latencies, 0, latencyCount);
 
         return new BenchmarkResult(
                 "",
@@ -252,16 +269,19 @@ public final class WebServerComparisonBenchmark {
                 errors.sum(),
                 completed == 0 ? 0.0 : (completed * 1_000_000_000.0 / elapsedNanos),
                 completed == 0 ? 0.0 : (latencyNanosTotal.sum() / 1_000_000.0 / completed),
-                percentileMillis(latencies, 0.95),
-                percentileMillis(latencies, 0.99));
+                percentileMillis(latencies, latencyCount, 0.95),
+                percentileMillis(latencies, latencyCount, 0.99));
     }
 
-    private static double percentileMillis(List<Long> latencies, double percentile) {
-        if (latencies.isEmpty()) {
+    private static double percentileMillis(long[] latencies, int size, double percentile) {
+        if (size <= 0) {
             return 0.0;
         }
-        int index = Math.max(0, (int) Math.ceil(percentile * latencies.size()) - 1);
-        return latencies.get(index) / 1_000_000.0;
+        int index = Math.max(0, (int) Math.ceil(percentile * size) - 1);
+        if (index >= size) {
+            index = size - 1;
+        }
+        return latencies[index] / 1_000_000.0;
     }
 
     private static void writeResults(List<BenchmarkResult> results, List<RunSample> rawSamples, BenchmarkResult winner)
@@ -462,6 +482,7 @@ public final class WebServerComparisonBenchmark {
     }
 
     private interface BenchServer extends AutoCloseable {
+
         String name();
 
         void start() throws Exception;
@@ -473,6 +494,7 @@ public final class WebServerComparisonBenchmark {
     }
 
     private static final class FastJavaAdapter implements BenchServer {
+
         private FastJavaNioServer server;
 
         @Override
@@ -482,7 +504,9 @@ public final class WebServerComparisonBenchmark {
 
         @Override
         public void start() throws Exception {
-            server = new FastJavaNioServer(0, RequestLimits.defaults(64 * 1024));
+            int workerThreads = Math.max(8, CONCURRENCY);
+            server = new FastJavaNioServer(0, RequestLimits.defaults(64 * 1024), workerThreads);
+            server.addStaticPlainTextRoute("/hello", "ok");
             server.addServlet("/hello", new HttpServlet() {
                 @Override
                 protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
@@ -508,6 +532,7 @@ public final class WebServerComparisonBenchmark {
     }
 
     private static final class UndertowAdapter implements BenchServer {
+
         private Undertow server;
         private int port;
 
@@ -548,6 +573,7 @@ public final class WebServerComparisonBenchmark {
     }
 
     private static final class TomcatAdapter implements BenchServer {
+
         private Tomcat tomcat;
         private Path baseDir;
         private int port;
@@ -609,6 +635,7 @@ public final class WebServerComparisonBenchmark {
     }
 
     private static final class NettyAdapter implements BenchServer {
+
         private EventLoopGroup bossGroup;
         private EventLoopGroup workerGroup;
         private Channel channel;
@@ -684,6 +711,7 @@ public final class WebServerComparisonBenchmark {
     }
 
     private static final class BenchmarkResult {
+
         private final String server;
         private final int requests;
         private final long success;
@@ -768,6 +796,7 @@ public final class WebServerComparisonBenchmark {
     }
 
     private static final class RunSample {
+
         private final int round;
         private final String server;
         private final BenchmarkResult result;

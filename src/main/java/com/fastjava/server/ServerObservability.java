@@ -6,6 +6,7 @@ import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.LongAdder;
 
 final class ServerObservability {
 
@@ -14,15 +15,16 @@ final class ServerObservability {
     };
 
     private static final AtomicLong activeConnections = new AtomicLong();
-    private static final AtomicLong requestsTotal = new AtomicLong();
-    private static final AtomicLong responsesTotal = new AtomicLong();
-    private static final AtomicLong bytesReceivedTotal = new AtomicLong();
-    private static final AtomicLong bytesSentTotal = new AtomicLong();
+    // LongAdder has less contention than AtomicLong under multi-threaded high-frequency updates.
+    private static final LongAdder requestsTotal = new LongAdder();
+    private static final LongAdder responsesTotal = new LongAdder();
+    private static final LongAdder bytesReceivedTotal = new LongAdder();
+    private static final LongAdder bytesSentTotal = new LongAdder();
+    private static final LongAdder requestDurationNanosSum = new LongAdder();
     private static final AtomicLong writeTimeoutsTotal = new AtomicLong();
     private static final AtomicLong rejectedConnectionsTotal = new AtomicLong();
     private static final AtomicLong keepAlivePreemptionsTotal = new AtomicLong();
     private static final AtomicLong handlerQueueDepth = new AtomicLong();
-    private static final AtomicLong requestDurationNanosSum = new AtomicLong();
     private static final AtomicLongArray requestDurationBuckets = new AtomicLongArray(LATENCY_BUCKETS_MS.length + 1);
     private static final ConcurrentHashMap<Integer, AtomicLong> responsesByStatus = new ConcurrentHashMap<>();
     private static final long PROMETHEUS_CACHE_TTL_MILLIS = 1_000L;
@@ -49,7 +51,7 @@ final class ServerObservability {
 
     static void recordRequestBytesReceived(long bytes) {
         if (bytes > 0) {
-            bytesReceivedTotal.addAndGet(bytes);
+            bytesReceivedTotal.add(bytes);
         }
     }
 
@@ -70,8 +72,8 @@ final class ServerObservability {
     }
 
     static void recordCompletedRequest(int statusCode, long durationNanos, long bytesSent) {
-        requestsTotal.incrementAndGet();
-        responsesTotal.incrementAndGet();
+        requestsTotal.increment();
+        responsesTotal.increment();
         AtomicLong statusCounter = responsesByStatus.get(statusCode);
         if (statusCounter == null) {
             AtomicLong created = new AtomicLong();
@@ -80,12 +82,13 @@ final class ServerObservability {
         }
         statusCounter.incrementAndGet();
         if (durationNanos > 0) {
-            requestDurationNanosSum.addAndGet(durationNanos);
-            long durationMs = Math.round(durationNanos / 1_000_000.0);
+            requestDurationNanosSum.add(durationNanos);
+            // Integer nanos→ms without floating-point: nanos / 1_000_000
+            long durationMs = durationNanos / 1_000_000L;
             requestDurationBuckets.incrementAndGet(findLatencyBucket(durationMs));
         }
         if (bytesSent > 0) {
-            bytesSentTotal.addAndGet(bytesSent);
+            bytesSentTotal.add(bytesSent);
         }
     }
 
@@ -102,10 +105,10 @@ final class ServerObservability {
 
             StringBuilder output = new StringBuilder(2_048);
             appendGauge(output, "fastjava_active_connections", activeConnections.get());
-            appendCounter(output, "fastjava_requests_total", requestsTotal.get());
-            appendCounter(output, "fastjava_responses_total", responsesTotal.get());
-            appendCounter(output, "fastjava_bytes_received_total", bytesReceivedTotal.get());
-            appendCounter(output, "fastjava_bytes_sent_total", bytesSentTotal.get());
+            appendCounter(output, "fastjava_requests_total", requestsTotal.sum());
+            appendCounter(output, "fastjava_responses_total", responsesTotal.sum());
+            appendCounter(output, "fastjava_bytes_received_total", bytesReceivedTotal.sum());
+            appendCounter(output, "fastjava_bytes_sent_total", bytesSentTotal.sum());
             appendCounter(output, "fastjava_write_timeouts_total", writeTimeoutsTotal.get());
             appendCounter(output, "fastjava_rejected_connections_total", rejectedConnectionsTotal.get());
             appendCounter(output, "fastjava_keepalive_preemptions_total", keepAlivePreemptionsTotal.get());
@@ -125,9 +128,9 @@ final class ServerObservability {
             cumulative += requestDurationBuckets.get(LATENCY_BUCKETS_MS.length);
             output.append("fastjava_request_duration_ms_bucket{le=\"+Inf\"} ").append(cumulative).append('\n');
             output.append("fastjava_request_duration_ms_sum ")
-                    .append(requestDurationNanosSum.get() / 1_000_000.0)
+                    .append(requestDurationNanosSum.sum() / 1_000_000.0)
                     .append('\n');
-            output.append("fastjava_request_duration_ms_count ").append(requestsTotal.get()).append('\n');
+            output.append("fastjava_request_duration_ms_count ").append(requestsTotal.sum()).append('\n');
 
             output.append("# HELP fastjava_responses_by_status_total Responses grouped by HTTP status code\n");
             output.append("# TYPE fastjava_responses_by_status_total counter\n");
