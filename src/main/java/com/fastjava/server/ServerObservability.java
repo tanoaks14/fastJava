@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.LongAdder;
 final class ServerObservability {
 
     private static final double[] LATENCY_BUCKETS_MS = {
-            1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000
+        1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000
     };
 
     private static final AtomicLong activeConnections = new AtomicLong();
@@ -35,7 +35,7 @@ final class ServerObservability {
     }
 
     static {
-        int[] commonStatusCodes = { 200, 204, 301, 302, 304, 400, 404, 500 };
+        int[] commonStatusCodes = {200, 204, 301, 302, 304, 400, 404, 500};
         for (int statusCode : commonStatusCodes) {
             responsesByStatus.put(statusCode, new AtomicLong());
         }

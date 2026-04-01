@@ -46,6 +46,7 @@ final class RequestTracing {
     }
 
     static final class SpanScope implements AutoCloseable {
+
         private final Span span;
         private final Scope scope;
 

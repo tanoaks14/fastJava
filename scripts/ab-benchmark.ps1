@@ -43,14 +43,14 @@
         -CandidateFlags "-Dfastjava.sse.skip=true"
 #>
 Param(
-    [string]$BaselineFlags   = "",
-    [string]$CandidateFlags  = "",
-    [int]$WarmupRequests     = 10000,
-    [int]$BenchmarkRequests  = 100000,
-    [int]$Concurrency        = 32,
-    [int]$Rounds             = 5,
-    [int]$Port               = 19080,
-    [string]$RoutePath       = "/api/hello"
+    [string]$BaselineFlags = "",
+    [string]$CandidateFlags = "",
+    [int]$WarmupRequests = 10000,
+    [int]$BenchmarkRequests = 100000,
+    [int]$Concurrency = 32,
+    [int]$Rounds = 5,
+    [int]$Port = 19080,
+    [string]$RoutePath = "/api/hello"
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,17 +68,17 @@ $runtimeClasspath = "target/test-classes;target/classes;" + (Get-Content $cpFile
 function Start-FjServer {
     param([string]$ExtraFlags, [int]$ListenPort)
     $flagArray = @("--add-modules", "jdk.incubator.vector",
-                   "-Dfastjava.tracing.enabled=false")
+        "-Dfastjava.tracing.enabled=false")
     if ($ExtraFlags -ne "") {
         $flagArray += ($ExtraFlags -split '\s+' | Where-Object { $_ -ne "" })
     }
     $flagArray += @("-cp", $runtimeClasspath,
-                    "com.fastjava.bench.profile.FastJavaIsolatedProfileServer",
-                    "$ListenPort")
+        "com.fastjava.bench.profile.FastJavaIsolatedProfileServer",
+        "$ListenPort")
     $proc = Start-Process -FilePath "java" `
-                          -ArgumentList $flagArray `
-                          -PassThru -WindowStyle Hidden `
-                          -RedirectStandardError "NUL"
+        -ArgumentList $flagArray `
+        -PassThru -WindowStyle Hidden `
+        -RedirectStandardError "NUL"
     # wait until port is open (max 10 s)
     $deadline = (Get-Date).AddSeconds(10)
     while ((Get-Date) -lt $deadline) {
@@ -87,7 +87,8 @@ function Start-FjServer {
             $tcp.Connect("127.0.0.1", $ListenPort)
             $tcp.Close()
             break
-        } catch { Start-Sleep -Milliseconds 200 }
+        }
+        catch { Start-Sleep -Milliseconds 200 }
     }
     return $proc
 }
@@ -117,8 +118,8 @@ function Measure-Throughput {
     if ($null -ne $throughput) {
         return [PSCustomObject]@{
             Throughput = $throughput
-            Success = $success
-            Errors = $errors
+            Success    = $success
+            Errors     = $errors
         }
     }
     throw "Load generator produced no throughput line.`n$($output -join "`n")"
@@ -159,15 +160,16 @@ function Invoke-Side {
             $successes += [long]$sample.Success
             $errors += [long]$sample.Errors
             Write-Host ("  round {0}: {1:N2} req/s, success={2}, errors={3}" -f $r, $sample.Throughput, $sample.Success, $sample.Errors)
-        } finally {
+        }
+        finally {
             Stop-FjServer -Proc $srv
             Start-Sleep -Milliseconds 300
         }
     }
     return [PSCustomObject]@{
         Throughputs = $throughputs
-        Successes = $successes
-        Errors = $errors
+        Successes   = $successes
+        Errors      = $errors
     }
 }
 
@@ -177,14 +179,14 @@ Write-Host "=== FastJava A/B Benchmark ==="
 Write-Host ("Route={0}" -f $RoutePath)
 Write-Host ("Warmup={0}  Benchmark={1}  Concurrency={2}  Rounds={3}" -f $WarmupRequests, $BenchmarkRequests, $Concurrency, $Rounds)
 
-$baseline  = Invoke-Side -Label "Baseline"  -Flags $BaselineFlags  -ListenPort $Port
+$baseline = Invoke-Side -Label "Baseline"  -Flags $BaselineFlags  -ListenPort $Port
 $candidate = Invoke-Side -Label "Candidate" -Flags $CandidateFlags -ListenPort $Port
 
-$baselineMedian  = Get-Median -Values $baseline.Throughputs
+$baselineMedian = Get-Median -Values $baseline.Throughputs
 $candidateMedian = Get-Median -Values $candidate.Throughputs
-$delta           = $candidateMedian - $baselineMedian
-$pct             = if ($baselineMedian -gt 0) { ($delta / $baselineMedian) * 100 } else { 0 }
-$sign            = if ($delta -ge 0) { "+" } else { "" }
+$delta = $candidateMedian - $baselineMedian
+$pct = if ($baselineMedian -gt 0) { ($delta / $baselineMedian) * 100 } else { 0 }
+$sign = if ($delta -ge 0) { "+" } else { "" }
 $baselineErrorsMedian = Get-MedianLong -Values $baseline.Errors
 $candidateErrorsMedian = Get-MedianLong -Values $candidate.Errors
 $baselineSuccessMedian = Get-MedianLong -Values $baseline.Successes
@@ -192,7 +194,7 @@ $candidateSuccessMedian = Get-MedianLong -Values $candidate.Successes
 
 Write-Host ""
 Write-Host "=== Results ==="
-Write-Host ("Baseline  median : {0,10:N2} req/s   (rounds: {1})" -f $baselineMedian,  ($baseline.Throughputs  | ForEach-Object { "{0:N0}" -f $_ }) -join ", ")
+Write-Host ("Baseline  median : {0,10:N2} req/s   (rounds: {1})" -f $baselineMedian, ($baseline.Throughputs  | ForEach-Object { "{0:N0}" -f $_ }) -join ", ")
 Write-Host ("Candidate median : {0,10:N2} req/s   (rounds: {1})" -f $candidateMedian, ($candidate.Throughputs | ForEach-Object { "{0:N0}" -f $_ }) -join ", ")
 Write-Host ("Baseline  medians: success={0} errors={1}" -f $baselineSuccessMedian, $baselineErrorsMedian)
 Write-Host ("Candidate medians: success={0} errors={1}" -f $candidateSuccessMedian, $candidateErrorsMedian)
@@ -200,8 +202,10 @@ Write-Host ("Delta            : {0}{1:N2} req/s  ({0}{2:N2}%)" -f $sign, $delta,
 Write-Host ""
 if ($delta -gt 0) {
     Write-Host "VERDICT: Candidate is FASTER"
-} elseif ($delta -lt 0) {
+}
+elseif ($delta -lt 0) {
     Write-Host "VERDICT: Candidate is SLOWER (regression)"
-} else {
+}
+else {
     Write-Host "VERDICT: No measurable difference"
 }

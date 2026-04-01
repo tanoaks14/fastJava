@@ -77,9 +77,9 @@ public class FastJavaNioServer {
     // on the selector thread and avoid worker handoff overhead.
     private static final boolean INLINE_REQUEST_EXECUTION = Boolean.getBoolean("fastjava.inline.requests");
     private static final boolean VIRTUAL_THREADS = Boolean.getBoolean("fastjava.virtual.threads.enabled");
-            // 0 means unbounded (legacy behavior). Set >0 to cap per-loop completion drain.
-            private static final int COMPLETION_DRAIN_BATCH =
-                Integer.getInteger("fastjava.selector.completion.drain.batch", 0);
+    // 0 means unbounded (legacy behavior). Set >0 to cap per-loop completion drain.
+    private static final int COMPLETION_DRAIN_BATCH
+            = Integer.getInteger("fastjava.selector.completion.drain.batch", 0);
     private static final int GATHER_WRITE_BATCH_SIZE = 16;
     private static final int SMALL_RESPONSE_COALESCE_BYTES = 1024;
     private static final int MAX_WEBSOCKET_PAYLOAD_BYTES = 64 * 1024;
@@ -2074,7 +2074,6 @@ public class FastJavaNioServer {
         }
     }
 
-
     private NioSseEmitter createNioSseEmitter(SelectionKey key, NioConnection connection) {
         return new NioSseEmitter((payload, closeAfterWrite) -> submitSelectorTask(() -> {
             if (!key.isValid()) {
@@ -2165,8 +2164,8 @@ public class FastJavaNioServer {
      * responses, the TCP send buffer is almost always available, so the write
      * succeeds without a partial-write fall-through.
      *
-     * @return true  if a write attempt was made (caller must NOT arm OP_WRITE)
-     *         false if not on selector thread (caller should fall back to OP_WRITE)
+     * @return true if a write attempt was made (caller must NOT arm OP_WRITE)
+     * false if not on selector thread (caller should fall back to OP_WRITE)
      */
     private boolean attemptInlineWrite(SelectionKey key, NioConnection connection) {
         if (!isSelectorThread()) {
