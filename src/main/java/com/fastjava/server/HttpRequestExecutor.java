@@ -7,7 +7,6 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -125,14 +124,14 @@ public final class HttpRequestExecutor {
             requestSpan.setAttribute("http.target", parsed.getURI());
         }
 
-        AtomicReference<AsyncExecutionState> asyncStateRef = null;
+        AsyncExecutionState[] asyncStateRef = null;
         if (asyncResponseHandler != null) {
-            asyncStateRef = new AtomicReference<>();
-            AtomicReference<AsyncExecutionState> finalAsyncStateRef = asyncStateRef;
+            asyncStateRef = new AsyncExecutionState[1];
+            AsyncExecutionState[] finalAsyncStateRef = asyncStateRef;
             request.configureAsyncContextFactory(() -> {
-                AsyncExecutionState current = finalAsyncStateRef.get();
+                AsyncExecutionState current = finalAsyncStateRef[0];
                 if (current == null) {
-                    AsyncExecutionState created = new AsyncExecutionState(
+                    current = new AsyncExecutionState(
                             request,
                             requestResponse,
                             parsed,
@@ -144,11 +143,7 @@ public final class HttpRequestExecutor {
                             remotePort,
                             requestSpan,
                             asyncResponseHandler);
-                    if (!finalAsyncStateRef.compareAndSet(null, created)) {
-                        current = finalAsyncStateRef.get();
-                    } else {
-                        current = created;
-                    }
+                    finalAsyncStateRef[0] = current;
                 }
                 return current.startAsync();
             });
@@ -204,7 +199,7 @@ public final class HttpRequestExecutor {
             }
         }
 
-        AsyncExecutionState asyncState = asyncStateRef == null ? null : asyncStateRef.get();
+        AsyncExecutionState asyncState = asyncStateRef == null ? null : asyncStateRef[0];
         if (asyncState != null && asyncState.hasStarted()) {
             return null;
         }

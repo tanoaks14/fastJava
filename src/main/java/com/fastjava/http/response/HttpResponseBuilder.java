@@ -134,7 +134,48 @@ public class HttpResponseBuilder {
         return buildSegments(chunkedResponse, explicitContentLength, false);
     }
 
+    public byte[] buildHeaderBytes(boolean chunkedResponse, Long explicitContentLength) {
+        return buildHeaderBytes(chunkedResponse, explicitContentLength, false);
+    }
+
+    public byte[] buildHeaderBytes(boolean chunkedResponse, Long explicitContentLength, boolean streamingChunked) {
+        return buildHeaderBytesInternal(chunkedResponse, explicitContentLength, streamingChunked);
+    }
+
     private byte[][] buildSegments(boolean chunkedResponse, Long explicitContentLength, boolean streamingChunked) {
+        byte[] bodyBytes = body != null ? body : EMPTY_BYTES;
+        boolean chunked = streamingChunked || chunkedResponse
+            || hasHeaderIgnoreCase(HEADER_TRANSFER_ENCODING, "chunked");
+        byte[] headerBytes = buildHeaderBytesInternal(chunkedResponse, explicitContentLength, streamingChunked);
+
+        if (!chunked) {
+            if (bodyBytes.length == 0) {
+                return new byte[][] { headerBytes };
+            }
+            return new byte[][] { headerBytes, bodyBytes };
+        }
+
+        if (streamingChunked) {
+            return new byte[][] { headerBytes };
+        }
+
+        if (bodyBytes.length == 0) {
+            return new byte[][] { headerBytes, CHUNK_TERMINATOR };
+        }
+
+        byte[] chunkPrefix = createChunkPrefix(bodyBytes.length);
+
+        return new byte[][] {
+                headerBytes,
+                chunkPrefix,
+                bodyBytes,
+                CRLF,
+                CHUNK_TERMINATOR
+        };
+    }
+
+    private byte[] buildHeaderBytesInternal(boolean chunkedResponse, Long explicitContentLength,
+            boolean streamingChunked) {
         position = 0;
 
         // Status line: HTTP/1.1 200 OK
@@ -147,7 +188,12 @@ public class HttpResponseBuilder {
             appendHeader(HEADER_CONTENT_TYPE, contentType);
         }
 
-        for (HeaderStorage.HeaderValue header : headers) {
+        int headerCount = headers.size();
+        for (int i = 0; i < headerCount; i++) {
+            HeaderStorage.HeaderValue header = headers.get(i);
+            if (header == null) {
+                continue;
+            }
             if (isHeader(header.name(), HEADER_CONTENT_TYPE)) {
                 continue;
             }
@@ -165,7 +211,6 @@ public class HttpResponseBuilder {
 
         byte[] bodyBytes = body != null ? body : EMPTY_BYTES;
         long contentLength = explicitContentLength != null ? explicitContentLength : bodyBytes.length;
-
         if (chunked) {
             append(HEADER_LINE_TE_CHUNKED);
         } else {
@@ -174,35 +219,24 @@ public class HttpResponseBuilder {
 
         // Blank line between headers and body
         append(CRLF);
+        return Arrays.copyOf(buffer, position);
+    }
 
-        byte[] headerBytes = Arrays.copyOf(buffer, position);
+    private byte[] createChunkPrefix(int contentLength) {
+        byte[] scratch = new byte[8];
+        int cursor = scratch.length;
+        int value = contentLength;
+        do {
+            int digit = value & 0xF;
+            scratch[--cursor] = (byte) (digit < 10 ? ('0' + digit) : ('a' + (digit - 10)));
+            value >>>= 4;
+        } while (value != 0);
 
-        if (!chunked) {
-            if (bodyBytes.length == 0) {
-                return new byte[][] { headerBytes };
-            }
-            return new byte[][] { headerBytes, bodyBytes };
-        }
-
-        if (streamingChunked) {
-            return new byte[][] { headerBytes };
-        }
-
-        if (bodyBytes.length == 0) {
-            return new byte[][] { headerBytes, CHUNK_TERMINATOR };
-        }
-
-        byte[] chunkSizeLine = Integer.toHexString(bodyBytes.length).getBytes(StandardCharsets.US_ASCII);
-        byte[] chunkPrefix = new byte[chunkSizeLine.length + CRLF.length];
-        SIMDVectorOps.batchCopy(chunkPrefix, 0, chunkSizeLine, CRLF);
-
-        return new byte[][] {
-                headerBytes,
-                chunkPrefix,
-                bodyBytes,
-                CRLF,
-                CHUNK_TERMINATOR
-        };
+        int hexLength = scratch.length - cursor;
+        byte[] chunkPrefix = new byte[hexLength + CRLF.length];
+        System.arraycopy(scratch, cursor, chunkPrefix, 0, hexLength);
+        System.arraycopy(CRLF, 0, chunkPrefix, hexLength, CRLF.length);
+        return chunkPrefix;
     }
 
     public static byte[] flattenSegments(byte[][] segments) {

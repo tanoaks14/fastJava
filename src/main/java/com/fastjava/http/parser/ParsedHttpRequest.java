@@ -39,6 +39,10 @@ public class ParsedHttpRequest {
     private final String headerConnection;
     private final String headerCookie;
     private final String headerAcceptEncoding;
+    private String headerLookupKey1;
+    private String headerLookupValue1;
+    private String headerLookupKey2;
+    private String headerLookupValue2;
     private volatile byte[] decodedBodyCache;
 
     public ParsedHttpRequest(
@@ -130,62 +134,112 @@ public class ParsedHttpRequest {
         if (name == null) {
             return null;
         }
+        if (name == headerLookupKey1 || name.equals(headerLookupKey1)) {
+            return headerLookupValue1;
+        }
+        if (name == headerLookupKey2 || name.equals(headerLookupKey2)) {
+            return headerLookupValue2;
+        }
+
         String commonHeaderValue = commonHeaderValue(name);
         if (commonHeaderValue != null) {
+            cacheHeaderLookup(name, commonHeaderValue);
             return commonHeaderValue;
         }
 
         if (isLowercaseAscii(name)) {
-            return headers.get(name);
+            String value = headers.get(name);
+            cacheHeaderLookup(name, value);
+            return value;
         }
+
         String exactCaseValue = headers.get(name);
         if (exactCaseValue != null) {
+            cacheHeaderLookup(name, exactCaseValue);
             return exactCaseValue;
         }
 
         for (Entry<String, String> header : headers.entrySet()) {
             if (asciiEqualsIgnoreCase(name, header.getKey())) {
-                return header.getValue();
+                String value = header.getValue();
+                cacheHeaderLookup(name, value);
+                return value;
             }
         }
+        cacheHeaderLookup(name, null);
         return null;
     }
 
     private String commonHeaderValue(String name) {
-        if (asciiEqualsIgnoreCase(name, HEADER_CONTENT_LENGTH)) {
-            return headerContentLength;
-        }
-        if (asciiEqualsIgnoreCase(name, HEADER_CONTENT_TYPE)) {
-            return headerContentType;
-        }
-        if (asciiEqualsIgnoreCase(name, HEADER_TRANSFER_ENCODING)) {
-            return headerTransferEncoding;
-        }
-        if (asciiEqualsIgnoreCase(name, HEADER_HOST)) {
-            return headerHost;
-        }
-        if (asciiEqualsIgnoreCase(name, HEADER_CONNECTION)) {
-            return headerConnection;
-        }
-        if (asciiEqualsIgnoreCase(name, HEADER_COOKIE)) {
-            return headerCookie;
-        }
-        if (asciiEqualsIgnoreCase(name, HEADER_ACCEPT_ENCODING)) {
-            return headerAcceptEncoding;
+        switch (name.length()) {
+            case 4:
+                if (asciiEqualsIgnoreCase(name, HEADER_HOST)) {
+                    return headerHost;
+                }
+                break;
+            case 6:
+                if (asciiEqualsIgnoreCase(name, HEADER_COOKIE)) {
+                    return headerCookie;
+                }
+                break;
+            case 10:
+                if (asciiEqualsIgnoreCase(name, HEADER_CONNECTION)) {
+                    return headerConnection;
+                }
+                break;
+            case 12:
+                if (asciiEqualsIgnoreCase(name, HEADER_CONTENT_TYPE)) {
+                    return headerContentType;
+                }
+                break;
+            case 14:
+                if (asciiEqualsIgnoreCase(name, HEADER_CONTENT_LENGTH)) {
+                    return headerContentLength;
+                }
+                break;
+            case 15:
+                if (asciiEqualsIgnoreCase(name, HEADER_ACCEPT_ENCODING)) {
+                    return headerAcceptEncoding;
+                }
+                break;
+            case 17:
+                if (asciiEqualsIgnoreCase(name, HEADER_TRANSFER_ENCODING)) {
+                    return headerTransferEncoding;
+                }
+                break;
+            default:
+                break;
         }
         return null;
     }
 
-    private static boolean asciiEqualsIgnoreCase(String candidate, String lowercaseExpected) {
-        if (candidate.length() != lowercaseExpected.length()) {
+    private void cacheHeaderLookup(String name, String value) {
+        headerLookupKey2 = headerLookupKey1;
+        headerLookupValue2 = headerLookupValue1;
+        headerLookupKey1 = name;
+        headerLookupValue1 = value;
+    }
+
+    private static boolean asciiEqualsIgnoreCase(String left, String right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null || left.length() != right.length()) {
             return false;
         }
-        for (int i = 0; i < candidate.length(); i++) {
-            char ch = candidate.charAt(i);
-            if (ch >= 'A' && ch <= 'Z') {
-                ch = (char) (ch + ('a' - 'A'));
+        for (int i = 0; i < left.length(); i++) {
+            char a = left.charAt(i);
+            char b = right.charAt(i);
+            if (a == b) {
+                continue;
             }
-            if (ch != lowercaseExpected.charAt(i)) {
+            if (a >= 'A' && a <= 'Z') {
+                a = (char) (a | 0x20);
+            }
+            if (b >= 'A' && b <= 'Z') {
+                b = (char) (b | 0x20);
+            }
+            if (a != b) {
                 return false;
             }
         }

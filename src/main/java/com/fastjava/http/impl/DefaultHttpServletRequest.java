@@ -44,6 +44,9 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
     private List<Part> parts;
     private List<Cookie> cookies;
     private Map<String, Cookie> cookieByName;
+    private final String cookieHeader;
+    private final byte[] cookieHeaderBytes;
+    private final boolean hasCookieHeader;
     private MultipartStreamingParser streamingMultipartParser;
     private boolean useStreamingMultipart = false;
     private final SessionManager sessionManager;
@@ -98,6 +101,9 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
         this.requestLimits = requestLimits;
         this.router = router;
         this.sessionManager = sessionManager;
+        this.cookieHeader = parsed == null ? null : parsed.getHeader("Cookie");
+        this.hasCookieHeader = cookieHeader != null && !cookieHeader.isBlank();
+        this.cookieHeaderBytes = hasCookieHeader ? cookieHeader.getBytes(StandardCharsets.US_ASCII) : null;
         String uri = parsed == null ? "/" : parsed.getURI();
         int query = uri.indexOf('?');
         this.currentRequestUri = query > 0 ? uri.substring(0, query) : uri;
@@ -377,15 +383,14 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
             return;
         }
 
-        String header = getHeader("Cookie");
-        if (header == null || header.isBlank()) {
+        if (!hasCookieHeader) {
             cookies = List.of();
             cookieByName = Map.of();
             return;
         }
 
         LinkedHashMap<String, Cookie> parsedCookies = new LinkedHashMap<>();
-        byte[] headerBytes = header.getBytes(StandardCharsets.US_ASCII);
+        byte[] headerBytes = cookieHeaderBytes;
         int start = 0;
         while (start < headerBytes.length) {
             int delimiter = SIMDByteScanner.indexOfByte(headerBytes, start, headerBytes.length, (byte) ';');
@@ -576,10 +581,10 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
         if (name == null) {
             return null;
         }
-        if (name.equals(attributeKey1)) {
+        if (name == attributeKey1 || name.equals(attributeKey1)) {
             return attributeValue1;
         }
-        if (name.equals(attributeKey2)) {
+        if (name == attributeKey2 || name.equals(attributeKey2)) {
             return attributeValue2;
         }
         return attributes == null ? null : attributes.get(name);
@@ -590,11 +595,11 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
         if (name == null) {
             return;
         }
-        if (name.equals(attributeKey1)) {
+        if (name == attributeKey1 || name.equals(attributeKey1)) {
             attributeValue1 = object;
             return;
         }
-        if (name.equals(attributeKey2)) {
+        if (name == attributeKey2 || name.equals(attributeKey2)) {
             attributeValue2 = object;
             return;
         }
@@ -864,9 +869,9 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
         }
         if (!sessionResolved) {
             sessionResolved = true;
-            Cookie cookie = getCookie(sessionManager.config().cookieName());
-            if (cookie != null) {
-                requestedSessionId = cookie.getValue();
+            String sessionId = findCookieValue(sessionManager.config().cookieName());
+            if (sessionId != null) {
+                requestedSessionId = sessionId;
                 session = sessionManager.findSession(requestedSessionId);
             }
         }
@@ -936,7 +941,7 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
         }
 
         // Fast path for stateless requests: no session API usage and no cookie header.
-        if (!sessionCreated && !sessionResolved && parsed.getHeader("Cookie") == null) {
+        if (!sessionCreated && !sessionResolved && !hasCookieHeader) {
             return;
         }
 
@@ -955,6 +960,61 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
             Cookie expired = buildExpiredSessionCookie(config, secureRequest);
             response.addCookie(expired);
         }
+    }
+
+    private String findCookieValue(String cookieName) {
+        if (!hasCookieHeader || cookieName == null || cookieName.isBlank()) {
+            return null;
+        }
+        byte[] bytes = cookieHeaderBytes;
+        String match = null;
+        int start = 0;
+        while (start < bytes.length) {
+            int delimiter = SIMDByteScanner.indexOfByte(bytes, start, bytes.length, (byte) ';');
+            if (delimiter < 0) {
+                delimiter = bytes.length;
+            }
+
+            int tokenStart = SIMDByteScanner.trimStart(bytes, start, delimiter);
+            int tokenEnd = SIMDByteScanner.trimEnd(bytes, tokenStart, delimiter);
+            if (tokenStart < tokenEnd) {
+                int eq = SIMDByteScanner.indexOfByte(bytes, tokenStart, tokenEnd, (byte) '=');
+                if (eq > tokenStart) {
+                    int nameStart = tokenStart;
+                    int nameEnd = SIMDByteScanner.trimEnd(bytes, nameStart, eq);
+                    if (asciiEqualsIgnoreCase(bytes, nameStart, nameEnd, cookieName)) {
+                        int valueStart = SIMDByteScanner.trimStart(bytes, eq + 1, tokenEnd);
+                        int valueEnd = SIMDByteScanner.trimEnd(bytes, valueStart, tokenEnd);
+                        String value = new String(bytes, valueStart, Math.max(0, valueEnd - valueStart),
+                                StandardCharsets.US_ASCII);
+                        match = unquoteCookieValue(value);
+                    }
+                }
+            }
+            start = delimiter + 1;
+        }
+        return match;
+    }
+
+    private static boolean asciiEqualsIgnoreCase(byte[] bytes, int start, int end, String expected) {
+        int length = end - start;
+        if (length != expected.length() || length <= 0) {
+            return false;
+        }
+        for (int i = 0; i < length; i++) {
+            int c = bytes[start + i] & 0xFF;
+            char e = expected.charAt(i);
+            if (c >= 'A' && c <= 'Z') {
+                c += 32;
+            }
+            if (e >= 'A' && e <= 'Z') {
+                e = (char) (e + 32);
+            }
+            if (c != e) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static Cookie buildSessionCookie(SessionConfig config, String sessionId, boolean secureRequest) {

@@ -33,7 +33,13 @@ public class HeaderStorage implements Iterable<HeaderStorage.HeaderValue> {
         if (size >= headers.length) {
             grow();
         }
-        headers[size++] = new HeaderValue(name, value);
+        HeaderValue slot = headers[size];
+        if (slot == null) {
+            headers[size] = new HeaderValue(name, value);
+        } else {
+            slot.set(name, value);
+        }
+        size++;
     }
 
     private void grow() {
@@ -50,7 +56,7 @@ public class HeaderStorage implements Iterable<HeaderStorage.HeaderValue> {
         // Remove existing header with same name (case-insensitive)
         for (int i = 0; i < size; i++) {
             if (equalsIgnoreCase(headers[i].name(), name)) {
-                headers[i] = new HeaderValue(name, value);
+                headers[i].set(name, value);
                 return;
             }
         }
@@ -144,10 +150,7 @@ public class HeaderStorage implements Iterable<HeaderStorage.HeaderValue> {
      * Clear all headers.
      */
     public void clear() {
-        // Null out references to allow GC
-        for (int i = 0; i < size; i++) {
-            headers[i] = null;
-        }
+        // Keep header slots for reuse; just reset logical size.
         size = 0;
     }
 
@@ -208,10 +211,14 @@ public class HeaderStorage implements Iterable<HeaderStorage.HeaderValue> {
      * Immutable header name-value pair.
      */
     public static final class HeaderValue {
-        private final String name;
-        private final String value;
+        private String name;
+        private String value;
 
         public HeaderValue(String name, String value) {
+            set(name, value);
+        }
+
+        private void set(String name, String value) {
             this.name = Objects.requireNonNull(name);
             this.value = Objects.requireNonNull(value);
         }

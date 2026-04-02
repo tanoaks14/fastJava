@@ -126,12 +126,18 @@ public class FastJavaNioServer {
     private long tlsTruststoreLastModifiedMillis = -1L;
     private long lastTlsReloadCheckMillis = 0L;
     private long lastIdleCheckMillis = 0L;
-    // Check for idle/timed-out connections at most once per second (not every selector loop).
-    private static final long IDLE_CHECK_INTERVAL_MS = 200L;
+    private long lastWriteTimeoutCheckMillis = 0L;
+    // Keep-alive expiration can be coarse-grained and cheap at 1s cadence.
+    private static final long IDLE_CHECK_INTERVAL_MS = 1_000L;
+    // Write timeout enforcement must stay responsive for slow-reader protection.
+    private static final long WRITE_TIMEOUT_CHECK_INTERVAL_MS = 200L;
+    private static final int NUM_SELECTORS = Integer.getInteger("fastjava.num.selectors", 1);
 
     private Selector selector;
     private ServerSocketChannel serverSocketChannel;
     private Thread selectorThread;
+    private SelectorGroup selectorGroup;
+    private final Set<Thread> selectorThreads = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public FastJavaNioServer(int port, RequestLimits requestLimits) {
         this(port,
@@ -302,18 +308,24 @@ public class FastJavaNioServer {
                 throw new IOException("Failed to initialise TLS context", exception);
             }
         }
-        selector = Selector.open();
         serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.configureBlocking(false);
         // Increase backlog to handle bursty connection acceptance
         serverSocketChannel.bind(new InetSocketAddress(port), 512);
-        serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
         running = true;
 
-        selectorThread = new Thread(this::runLoop, "FastJava-Nio-Selector");
-        selectorThread.setDaemon(false);
-        selectorThread.start();
-        logger.info("FastJava NIO Server started on port {}", getBoundPort());
+        if (NUM_SELECTORS > 1) {
+            selectorGroup = new SelectorGroup(NUM_SELECTORS, this, serverSocketChannel);
+            selector = selectorGroup.getAcceptorSelector();
+            selectorGroup.start();
+        } else {
+            selector = Selector.open();
+            serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+            selectorThread = new Thread(this::runLoop, "FastJava-Nio-Selector");
+            selectorThread.setDaemon(false);
+            selectorThread.start();
+        }
+        logger.info("FastJava NIO Server started on port {} (selectors: {})", getBoundPort(), NUM_SELECTORS);
     }
 
     public void stop() {
@@ -321,7 +333,9 @@ public class FastJavaNioServer {
             return;
         }
         running = false;
-        if (selector != null) {
+        if (selectorGroup != null) {
+            selectorGroup.stop();
+        } else if (selector != null) {
             selector.wakeup();
         }
         try {
@@ -351,6 +365,11 @@ public class FastJavaNioServer {
     }
 
     public void waitForStop() throws InterruptedException {
+        if (selectorGroup != null) {
+            selectorGroup.waitForStop();
+        } else if (selectorThread != null) {
+            selectorThread.join();
+        }
         stopLatch.await();
     }
 
@@ -428,7 +447,7 @@ public class FastJavaNioServer {
         }
     }
 
-    private void drainPendingTlsRegistrations() throws IOException {
+    void drainPendingTlsRegistrations() throws IOException {
         TlsChannelHandler handler;
         while ((handler = pendingTlsRegistrations.poll()) != null) {
             NioConnection.ProtocolMode protocolMode = resolveTlsProtocolMode(handler);
@@ -445,13 +464,17 @@ public class FastJavaNioServer {
             }
             SocketChannel ch = handler.channel();
             ch.configureBlocking(false);
-            SelectionKey key = ch.register(selector, SelectionKey.OP_READ);
-            key.attach(new NioConnection(ch, requestLimits, handler, protocolMode));
+            Selector targetSelector = getSelectorForConnection();
+                SelectionKey key = ch.register(
+                    targetSelector,
+                    SelectionKey.OP_READ,
+                    new NioConnection(ch, requestLimits, handler, protocolMode));
             ServerObservability.connectionOpened();
+            registerConnectionForWriting(key);
         }
     }
 
-    private void drainSelectorTasks() {
+    void drainSelectorTasks() {
         Runnable task;
         while ((task = selectorTasks.poll()) != null) {
             try {
@@ -468,10 +491,29 @@ public class FastJavaNioServer {
     }
 
     private boolean isSelectorThread() {
+        if (selectorGroup != null) {
+            return selectorThreads.contains(Thread.currentThread());
+        }
         return Thread.currentThread() == selectorThread;
     }
 
+    void onSelectorThreadStart(Thread thread) {
+        if (thread != null) {
+            selectorThreads.add(thread);
+        }
+    }
+
+    void onSelectorThreadStop(Thread thread) {
+        if (thread != null) {
+            selectorThreads.remove(thread);
+        }
+    }
+
     private void requestSelectorWakeup() {
+        if (selectorGroup != null) {
+            selectorGroup.wakeupAcceptor();
+            return;
+        }
         if (selector == null || isSelectorThread()) {
             return;
         }
@@ -480,7 +522,7 @@ public class FastJavaNioServer {
         }
     }
 
-    private void acceptConnection() throws IOException {
+    void acceptConnection() throws IOException {
         SocketChannel channel;
         while ((channel = serverSocketChannel.accept()) != null) {
             configureAcceptedChannel(channel);
@@ -496,9 +538,13 @@ public class FastJavaNioServer {
                 }
             } else {
                 channel.configureBlocking(false);
-                SelectionKey key = channel.register(selector, SelectionKey.OP_READ);
-                key.attach(new NioConnection(channel, requestLimits, null, NioConnection.ProtocolMode.HTTP1));
+                Selector targetSelector = getSelectorForConnection();
+                SelectionKey key = channel.register(
+                        targetSelector,
+                        SelectionKey.OP_READ,
+                        new NioConnection(channel, requestLimits, null, NioConnection.ProtocolMode.HTTP1));
                 ServerObservability.connectionOpened();
+                registerConnectionForWriting(key);
             }
         }
     }
@@ -619,7 +665,7 @@ public class FastJavaNioServer {
         }
     }
 
-    private void handleRead(SelectionKey key) throws IOException {
+    void handleRead(SelectionKey key) throws IOException {
         NioConnection connection = (NioConnection) key.attachment();
         int bytesRead = connection.readFromChannel();
         if (bytesRead == -1) {
@@ -636,7 +682,7 @@ public class FastJavaNioServer {
         processBufferedData(key, connection);
     }
 
-    private void handleWrite(SelectionKey key) throws IOException {
+    void handleWrite(SelectionKey key) throws IOException {
         NioConnection connection = (NioConnection) key.attachment();
         int bytesWritten;
         try (RequestTracing.SpanScope ignored = RequestTracing.startChildSpan("http.write")) {
@@ -682,7 +728,7 @@ public class FastJavaNioServer {
         }
         queueHttp2InitialSettings(key, connection);
         key.interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
-        selector.wakeup();
+        registerConnectionForWriting(key);
     }
 
     private void processBufferedData(SelectionKey key, NioConnection connection) throws IOException {
@@ -1701,12 +1747,11 @@ public class FastJavaNioServer {
         try {
             workerExecutor.execute(() -> executeRequestAsync(key, connection, parsed, requestSequence));
         } catch (RejectedExecutionException exception) {
-            completionQueue.add(NioCompletion.failure(
+            enqueueCompletion(NioCompletion.failure(
                     key,
                     requestSequence,
                     SimpleHttpResponses.plainText(503, "Server shutting down"),
                     true));
-            selector.wakeup();
         }
     }
 
@@ -2015,8 +2060,7 @@ public class FastJavaNioServer {
             byte[] responseBytes,
             boolean closeAfterWrite) {
         connection.markExecuting();
-        completionQueue.add(NioCompletion.failure(key, sequence, responseBytes, closeAfterWrite));
-        selector.wakeup();
+        enqueueCompletion(NioCompletion.failure(key, sequence, responseBytes, closeAfterWrite));
     }
 
     private void executeRequestAsync(
@@ -2029,8 +2073,7 @@ public class FastJavaNioServer {
             final HttpRequestExecutor.AsyncResponseHandler asyncHandler = new HttpRequestExecutor.AsyncResponseHandler() {
                 @Override
                 public void onComplete(HttpExecutionResult result) {
-                    completionQueue.add(NioCompletion.success(key, requestSequence, result));
-                    requestSelectorWakeup();
+                    enqueueCompletion(NioCompletion.success(key, requestSequence, result));
                 }
 
                 @Override
@@ -2059,19 +2102,44 @@ public class FastJavaNioServer {
                         localPort, requestLimits, tlsEnabled, false, asyncHandler);
             }
             if (executionResult != null) {
-                completionQueue.add(NioCompletion.success(key, requestSequence, executionResult));
+                enqueueCompletion(NioCompletion.success(key, requestSequence, executionResult));
             }
         } catch (Exception exception) {
             logger.debug("Async request execution failed: {}", exception.getMessage());
-            completionQueue
-                    .add(NioCompletion.failure(
-                            key,
-                            requestSequence,
-                            SimpleHttpResponses.plainText(500, "Internal Server Error"),
-                            true));
-        } finally {
-            requestSelectorWakeup();
+            enqueueCompletion(NioCompletion.failure(
+                    key,
+                    requestSequence,
+                    SimpleHttpResponses.plainText(500, "Internal Server Error"),
+                    true));
         }
+    }
+
+    private void enqueueCompletion(NioCompletion completion) {
+        if (completion == null) {
+            return;
+        }
+        SelectionKey key = completion.key();
+        if (selectorGroup != null && key != null) {
+            selectorGroup.enqueueSelectorCompletion(key.selector(), completion);
+            registerConnectionForWriting(key);
+            return;
+        }
+        completionQueue.add(completion);
+        requestSelectorWakeup();
+    }
+
+    void applyCompletion(NioCompletion completion) {
+        if (completion == null) {
+            return;
+        }
+        SelectionKey key = completion.key();
+        if (key == null || !key.isValid()) {
+            return;
+        }
+        NioConnection connection = (NioConnection) key.attachment();
+        connection.markResponseReady();
+        connection.enqueueCompletedResponse(completion);
+        drainCompletedResponsesInOrder(key, connection);
     }
 
     private NioSseEmitter createNioSseEmitter(SelectionKey key, NioConnection connection) {
@@ -2086,21 +2154,12 @@ public class FastJavaNioServer {
         }));
     }
 
-    private void applyCompletedExecutions(int maxCompletions) {
+    void applyCompletedExecutions(int maxCompletions) {
         int processed = 0;
         NioCompletion completion;
         while ((maxCompletions <= 0 || processed < maxCompletions)
                 && (completion = completionQueue.poll()) != null) {
-            SelectionKey key = completion.key();
-            if (key == null || !key.isValid()) {
-                processed++;
-                continue;
-            }
-
-            NioConnection connection = (NioConnection) key.attachment();
-            connection.markResponseReady();
-            connection.enqueueCompletedResponse(completion);
-            drainCompletedResponsesInOrder(key, connection);
+            applyCompletion(completion);
             processed++;
         }
     }
@@ -2144,7 +2203,7 @@ public class FastJavaNioServer {
             return;
         }
         key.interestOps(SelectionKey.OP_WRITE);
-        selector.wakeup();
+        registerConnectionForWriting(key);
     }
 
     private void queueResponse(SelectionKey key, NioConnection connection, HttpExecutionResult executionResult,
@@ -2154,7 +2213,7 @@ public class FastJavaNioServer {
             return;
         }
         key.interestOps(SelectionKey.OP_WRITE);
-        selector.wakeup();
+        registerConnectionForWriting(key);
     }
 
     /**
@@ -2206,20 +2265,37 @@ public class FastJavaNioServer {
         return true;
     }
 
-    private void expireIdleConnections() {
+    void expireIdleConnections() {
         long now = System.currentTimeMillis();
-        if (now - lastIdleCheckMillis < IDLE_CHECK_INTERVAL_MS) {
+        boolean doIdleCheck = now - lastIdleCheckMillis >= IDLE_CHECK_INTERVAL_MS;
+        boolean doWriteTimeoutCheck = now - lastWriteTimeoutCheckMillis >= WRITE_TIMEOUT_CHECK_INTERVAL_MS;
+        if (!doIdleCheck && !doWriteTimeoutCheck) {
             return;
         }
-        lastIdleCheckMillis = now;
-        for (SelectionKey key : selector.keys()) {
+        if (doIdleCheck) {
+            lastIdleCheckMillis = now;
+        }
+        if (doWriteTimeoutCheck) {
+            lastWriteTimeoutCheckMillis = now;
+        }
+        expireIdleConnectionsOnSelector(selector, now, doIdleCheck, doWriteTimeoutCheck);
+    }
+
+    void expireIdleConnectionsOnSelector(Selector targetSelector, long now, boolean doIdleCheck, boolean doWriteTimeoutCheck) {
+        if (targetSelector == null) {
+            return;
+        }
+        for (SelectionKey key : targetSelector.keys()) {
             if (!(key.attachment() instanceof NioConnection connection)) {
                 continue;
             }
             if (connection.hasPendingWrite()) {
-                if (connection.hasExceededWriteTimeout(now, requestLimits.writeTimeoutMillis())) {
+                if (doWriteTimeoutCheck && connection.hasExceededWriteTimeout(now, requestLimits.writeTimeoutMillis())) {
                     handleWriteTimeout(key, connection, now);
                 }
+                continue;
+            }
+            if (!doIdleCheck) {
                 continue;
             }
             if (connection.isExecuting()) {
@@ -2248,7 +2324,7 @@ public class FastJavaNioServer {
         closeKey(key);
     }
 
-    private void closeKey(SelectionKey key) {
+    void closeKey(SelectionKey key) {
         try {
             if (key.attachment() instanceof NioConnection connection) {
                 connection.closeResources();
@@ -2325,6 +2401,8 @@ public class FastJavaNioServer {
         private int inFlightHttp2Requests;
         private Integer pendingContinuationStreamId;
         private int highestClientStreamId;
+        private String cachedRemoteAddress;
+        private int cachedRemotePort;
         private int connectionReceiveWindow;
         private int connectionSendWindow;
         private int peerInitialStreamWindowSize;
@@ -2375,6 +2453,8 @@ public class FastJavaNioServer {
             this.inFlightHttp2Requests = 0;
             this.pendingContinuationStreamId = null;
             this.highestClientStreamId = 0;
+            this.cachedRemoteAddress = null;
+            this.cachedRemotePort = -1;
             this.connectionReceiveWindow = HTTP2_DEFAULT_INITIAL_WINDOW_SIZE;
             this.connectionSendWindow = HTTP2_DEFAULT_INITIAL_WINDOW_SIZE;
             this.peerInitialStreamWindowSize = HTTP2_DEFAULT_INITIAL_WINDOW_SIZE;
@@ -3169,11 +3249,25 @@ public class FastJavaNioServer {
         }
 
         private String remoteAddress() throws IOException {
-            return ((InetSocketAddress) channel.getRemoteAddress()).getAddress().getHostAddress();
+            if (cachedRemoteAddress != null) {
+                return cachedRemoteAddress;
+            }
+            InetSocketAddress remote = (InetSocketAddress) channel.getRemoteAddress();
+            if (remote == null || remote.getAddress() == null) {
+                cachedRemoteAddress = "unavailable";
+            } else {
+                cachedRemoteAddress = remote.getAddress().getHostAddress();
+            }
+            return cachedRemoteAddress;
         }
 
         private int remotePort() throws IOException {
-            return ((InetSocketAddress) channel.getRemoteAddress()).getPort();
+            if (cachedRemotePort >= 0) {
+                return cachedRemotePort;
+            }
+            InetSocketAddress remote = (InetSocketAddress) channel.getRemoteAddress();
+            cachedRemotePort = remote == null ? -1 : remote.getPort();
+            return cachedRemotePort;
         }
 
         private int localPort() throws IOException {
@@ -3186,7 +3280,8 @@ public class FastJavaNioServer {
 
         private String remoteAddressSafely() {
             try {
-                return remoteAddress() + ":" + remotePort();
+                int port = remotePort();
+                return port >= 0 ? remoteAddress() + ":" + port : remoteAddress();
             } catch (IOException exception) {
                 return "unavailable";
             }
@@ -3384,7 +3479,7 @@ public class FastJavaNioServer {
 
     }
 
-    private record NioCompletion(
+    static record NioCompletion(
             SelectionKey key,
             long sequence,
             HttpExecutionResult executionResult,
@@ -3433,6 +3528,33 @@ public class FastJavaNioServer {
             } catch (RuntimeException ignored) {
                 return 500;
             }
+        }
+    }
+
+    // ===== Multi-Selector Architecture Support Methods =====
+
+    Selector getSelectorForConnection() {
+        if (selectorGroup != null) {
+            return selectorGroup.getNextSelectorForConnection();
+        }
+        return selector;
+    }
+
+    boolean hasPendingWork() {
+        return !completionQueue.isEmpty() || !selectorTasks.isEmpty() || !pendingTlsRegistrations.isEmpty();
+    }
+
+    void registerConnectionForWriting(SelectionKey key) {
+        if (key == null || !key.isValid()) {
+            return;
+        }
+        Selector targetSelector = key.selector();
+        if (selectorGroup != null) {
+            selectorGroup.requestSelectorWakeup(targetSelector);
+            return;
+        }
+        if (selector != null && targetSelector != selector) {
+            targetSelector.wakeup();
         }
     }
 }

@@ -177,7 +177,8 @@ function Format-Top {
 
 $jfr = Resolve-JfrFile -File $JfrFile -Root $OutputDir
 $summary = jfr summary "$jfr"
-$allEvents = jfr print --events jdk.ThreadPark, jdk.GarbageCollection, jdk.GCPhasePause, jdk.SocketRead, jdk.SocketWrite, jdk.ThreadStart, jdk.ThreadEnd "$jfr"
+$eventFilter = "jdk.ThreadPark,jdk.GarbageCollection,jdk.GCPhasePause,jdk.SocketRead,jdk.SocketWrite,jdk.ThreadStart,jdk.ThreadEnd"
+$allEvents = jfr print --events $eventFilter "$jfr"
 $allText = ($allEvents -join [Environment]::NewLine)
 
 $reportLines = New-Object System.Collections.Generic.List[string]

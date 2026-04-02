@@ -201,28 +201,26 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
         }
 
         if (streamingChunkedResponseEnabled) {
-            return new ByteBuffer[] { ByteBuffer.wrap(builder.buildStreamingChunkedHeaders()) };
+            return new ByteBuffer[] { ByteBuffer.wrap(builder.buildHeaderBytes(false, null, true)) };
         }
 
         if (fileBodyPath != null) {
-            byte[][] headerSegments = builder.buildSegments(false, fileBodyLength);
-            return toByteBuffers(headerSegments);
+            byte[] headerBytes = builder.buildHeaderBytes(false, fileBodyLength, false);
+            return new ByteBuffer[] { ByteBuffer.wrap(headerBytes) };
         }
 
         if (chunkedResponseEnabled) {
             int bodyLength = outputBuffer.size();
             builder.setBody(EMPTY_BODY);
-            byte[][] headerSegments = new byte[][] { builder.buildStreamingChunkedHeaders() };
+            byte[] headerBytes = builder.buildHeaderBytes(false, null, true);
             if (bodyLength == 0) {
-                return toByteBuffers(headerSegments);
+                return new ByteBuffer[] { ByteBuffer.wrap(headerBytes) };
             }
 
-            byte[] chunkSizeLine = Integer.toHexString(bodyLength).getBytes(StandardCharsets.US_ASCII);
-            ByteBuffer[] buffers = new ByteBuffer[headerSegments.length + 5];
+            byte[] chunkSizeLine = toChunkSizeLine(bodyLength);
+            ByteBuffer[] buffers = new ByteBuffer[6];
             int index = 0;
-            for (byte[] segment : headerSegments) {
-                buffers[index++] = segment == null ? null : ByteBuffer.wrap(segment);
-            }
+            buffers[index++] = ByteBuffer.wrap(headerBytes);
             buffers[index++] = ByteBuffer.wrap(chunkSizeLine);
             buffers[index++] = ByteBuffer.wrap(CRLF);
             buffers[index++] = ByteBuffer.wrap(outputBuffer.toByteArray());
@@ -233,19 +231,32 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
 
         int bodyLength = outputBuffer.size();
         builder.setBody(EMPTY_BODY);
-        byte[][] headerSegments = builder.buildSegments(false, (long) bodyLength);
+        byte[] headerBytes = builder.buildHeaderBytes(false, (long) bodyLength, false);
 
         if (bodyLength == 0) {
-            return toByteBuffers(headerSegments);
+            return new ByteBuffer[] { ByteBuffer.wrap(headerBytes) };
         }
 
-        ByteBuffer[] buffers = new ByteBuffer[headerSegments.length + 1];
-        for (int i = 0; i < headerSegments.length; i++) {
-            byte[] segment = headerSegments[i];
-            buffers[i] = segment == null ? null : ByteBuffer.wrap(segment);
-        }
-        buffers[headerSegments.length] = ByteBuffer.wrap(outputBuffer.toByteArray());
+        ByteBuffer[] buffers = new ByteBuffer[2];
+        buffers[0] = ByteBuffer.wrap(headerBytes);
+        buffers[1] = ByteBuffer.wrap(outputBuffer.toByteArray());
         return buffers;
+    }
+
+    private static byte[] toChunkSizeLine(int length) {
+        byte[] scratch = new byte[8];
+        int cursor = scratch.length;
+        int value = length;
+        do {
+            int digit = value & 0xF;
+            scratch[--cursor] = (byte) (digit < 10 ? ('0' + digit) : ('a' + (digit - 10)));
+            value >>>= 4;
+        } while (value != 0);
+
+        int hexLength = scratch.length - cursor;
+        byte[] line = new byte[hexLength];
+        System.arraycopy(scratch, cursor, line, 0, hexLength);
+        return line;
     }
 
     private static ByteBuffer[] toByteBuffers(byte[][] segments) {

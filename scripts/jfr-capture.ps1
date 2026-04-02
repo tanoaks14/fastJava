@@ -7,6 +7,9 @@
     String to match against jcmd's process list (class name fragment).
     Default: "FastJavaIsolatedProfileServer"
 
+.PARAMETER ProcessId
+    Explicit JVM PID to attach to. If provided, ProcessPattern is ignored.
+
 .PARAMETER DurationSeconds
     How long to record JFR data. Default 30.
 
@@ -31,6 +34,7 @@
 #>
 Param(
     [string]$ProcessPattern  = "FastJavaIsolatedProfileServer",
+    [int]$ProcessId          = 0,
     [int]$DurationSeconds    = 30,
     [string]$OutputDir       = "target/profiles",
     [string]$Name            = "",
@@ -41,14 +45,21 @@ Param(
 $ErrorActionPreference = "Stop"
 
 # ── Find PID ──────────────────────────────────────────────────────────────────
-$jcmdOut = & jcmd -l 2>&1
-$matchLine = $jcmdOut | Where-Object { $_ -match $ProcessPattern } | Select-Object -First 1
-if (-not $matchLine) {
-    Write-Error "No running JVM matched pattern '$ProcessPattern'.`nRunning JVMs:`n$($jcmdOut -join "`n")"
-    exit 1
+$procId = ""
+if ($ProcessId -gt 0) {
+    $procId = "$ProcessId"
+    Write-Host "Using explicit PID $procId"
 }
-$procId = ($matchLine -split '\s+')[0].Trim()
-Write-Host "Found PID $procId  ($matchLine)"
+else {
+    $jcmdOut = & jcmd -l 2>&1
+    $matchLine = $jcmdOut | Where-Object { $_ -match $ProcessPattern } | Select-Object -First 1
+    if (-not $matchLine) {
+        Write-Error "No running JVM matched pattern '$ProcessPattern'.`nRunning JVMs:`n$($jcmdOut -join "`n")"
+        exit 1
+    }
+    $procId = ($matchLine -split '\s+')[0].Trim()
+    Write-Host "Found PID $procId  ($matchLine)"
+}
 
 # ── Prepare output dir ────────────────────────────────────────────────────────
 if (!(Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir | Out-Null }
