@@ -1,13 +1,18 @@
 package com.fastjava.http.impl;
 
-import com.fastjava.servlet.*;
-import com.fastjava.http.response.HttpResponseBuilder;
-import java.io.*;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.PrintWriter;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+
+import com.fastjava.http.response.HttpResponseBuilder;
+import com.fastjava.servlet.Cookie;
+import com.fastjava.servlet.HttpServletResponse;
 
 /**
  * Concrete HttpServletResponse implementation.
@@ -185,7 +190,7 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
             builder.setContentType(contentType);
         }
         if (streamingChunkedResponseEnabled) {
-            return new byte[][] { builder.buildStreamingChunkedHeaders() };
+            return new byte[][]{builder.buildStreamingChunkedHeaders()};
         }
         if (fileBodyPath != null) {
             return builder.buildSegments(false, fileBodyLength);
@@ -201,12 +206,12 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
         }
 
         if (streamingChunkedResponseEnabled) {
-            return new ByteBuffer[] { ByteBuffer.wrap(builder.buildHeaderBytes(false, null, true)) };
+            return new ByteBuffer[]{ByteBuffer.wrap(builder.buildHeaderBytes(false, null, true))};
         }
 
         if (fileBodyPath != null) {
             byte[] headerBytes = builder.buildHeaderBytes(false, fileBodyLength, false);
-            return new ByteBuffer[] { ByteBuffer.wrap(headerBytes) };
+            return new ByteBuffer[]{ByteBuffer.wrap(headerBytes)};
         }
 
         if (chunkedResponseEnabled) {
@@ -214,7 +219,7 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
             builder.setBody(EMPTY_BODY);
             byte[] headerBytes = builder.buildHeaderBytes(false, null, true);
             if (bodyLength == 0) {
-                return new ByteBuffer[] { ByteBuffer.wrap(headerBytes) };
+                return new ByteBuffer[]{ByteBuffer.wrap(headerBytes)};
             }
 
             byte[] chunkSizeLine = toChunkSizeLine(bodyLength);
@@ -234,7 +239,7 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
         byte[] headerBytes = builder.buildHeaderBytes(false, (long) bodyLength, false);
 
         if (bodyLength == 0) {
-            return new ByteBuffer[] { ByteBuffer.wrap(headerBytes) };
+            return new ByteBuffer[]{ByteBuffer.wrap(headerBytes)};
         }
 
         ByteBuffer[] buffers = new ByteBuffer[2];
@@ -329,10 +334,9 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
     }
 
     /**
-     * Replace the response body with raw bytes, bypassing the PrintWriter encoding
-     * path.
-     * Used by GzipResponseWrapper to inject compressed bytes after the filter chain
-     * runs.
+     * Replace the response body with raw bytes, bypassing the PrintWriter
+     * encoding path. Used by GzipResponseWrapper to inject compressed bytes
+     * after the filter chain runs.
      */
     public void setRawBody(byte[] bytes) {
         writer.flush();
@@ -405,10 +409,14 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
         validateCookieToken(sameSite, "SameSite");
         String normalized = sameSite.trim().toLowerCase();
         return switch (normalized) {
-            case "lax" -> "Lax";
-            case "strict" -> "Strict";
-            case "none" -> "None";
-            default -> throw new IllegalArgumentException("Unsupported SameSite value: " + sameSite);
+            case "lax" ->
+                "Lax";
+            case "strict" ->
+                "Strict";
+            case "none" ->
+                "None";
+            default ->
+                throw new IllegalArgumentException("Unsupported SameSite value: " + sameSite);
         };
     }
 
@@ -425,6 +433,7 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
     }
 
     private static final class FastByteArrayOutputStream extends ByteArrayOutputStream {
+
         private FastByteArrayOutputStream(int size) {
             super(size);
         }

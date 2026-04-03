@@ -9,20 +9,21 @@ import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Manages parallel selector threads.
- * Selector 0 owns OP_ACCEPT and accepts new channels.
+ * Manages parallel selector threads. Selector 0 owns OP_ACCEPT and accepts new
+ * channels.
  */
 final class SelectorGroup {
+
     private static final Logger logger = LoggerFactory.getLogger(SelectorGroup.class);
     private static final boolean DISTRIBUTE_CONNECTIONS = Boolean.getBoolean("fastjava.selectors.distribute");
     private static final int COMPLETION_RING_CAPACITY = Integer.getInteger("fastjava.selectors.completion.ring", 8192);
@@ -295,6 +296,7 @@ final class SelectorGroup {
     }
 
     private static final class MpscCompletionRing {
+
         private final int capacity;
         private final int mask;
         private final AtomicReferenceArray<FastJavaNioServer.NioCompletion> entries;

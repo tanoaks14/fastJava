@@ -3,10 +3,10 @@ package com.fastjava.http.response;
 import java.util.Objects;
 
 /**
- * Optimized fixed-capacity header storage for HTTP responses.
- * Replaces ArrayList<HeaderValue> with a fixed-size array for O(1) removal
- * and reduced per-request allocations.
- * 
+ * Optimized fixed-capacity header storage for HTTP responses. Replaces
+ * ArrayList<HeaderValue> with a fixed-size array for O(1) removal and reduced
+ * per-request allocations.
+ *
  * Typical HTTP responses have 10-20 headers, so a fixed array of 32 is optimal.
  */
 public class HeaderStorage implements Iterable<HeaderStorage.HeaderValue> {
@@ -169,8 +169,9 @@ public class HeaderStorage implements Iterable<HeaderStorage.HeaderValue> {
     public String toString() {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < size; i++) {
-            if (i > 0)
+            if (i > 0) {
                 sb.append(", ");
+            }
             HeaderValue h = headers[i];
             sb.append(h.name()).append(": ").append(h.value());
         }
@@ -178,22 +179,28 @@ public class HeaderStorage implements Iterable<HeaderStorage.HeaderValue> {
     }
 
     private static boolean equalsIgnoreCase(String a, String b) {
-        if (a == null || b == null)
+        if (a == null || b == null) {
             return a == b;
-        if (a == b)
+        }
+        if (a == b) {
             return true;
-        if (a.length() != b.length())
+        }
+        if (a.length() != b.length()) {
             return false;
+        }
         for (int i = 0; i < a.length(); i++) {
             char ca = a.charAt(i);
             char cb = b.charAt(i);
             if (ca != cb) {
-                if (ca >= 'A' && ca <= 'Z')
+                if (ca >= 'A' && ca <= 'Z') {
                     ca += 32;
-                if (cb >= 'A' && cb <= 'Z')
+                }
+                if (cb >= 'A' && cb <= 'Z') {
                     cb += 32;
-                if (ca != cb)
+                }
+                if (ca != cb) {
                     return false;
+                }
             }
         }
         return true;
@@ -204,6 +211,7 @@ public class HeaderStorage implements Iterable<HeaderStorage.HeaderValue> {
      */
     @FunctionalInterface
     public interface HeaderConsumer {
+
         void accept(HeaderValue header);
     }
 
@@ -211,6 +219,7 @@ public class HeaderStorage implements Iterable<HeaderStorage.HeaderValue> {
      * Immutable header name-value pair.
      */
     public static final class HeaderValue {
+
         private String name;
         private String value;
 

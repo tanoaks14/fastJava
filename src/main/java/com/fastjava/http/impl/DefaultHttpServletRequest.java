@@ -1,6 +1,24 @@
 package com.fastjava.http.impl;
 
-import com.fastjava.servlet.*;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.PrintWriter;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Supplier;
+
 import com.fastjava.http.parser.MultipartFormDataParser;
 import com.fastjava.http.parser.MultipartStreamingParser;
 import com.fastjava.http.parser.ParsedHttpRequest;
@@ -9,19 +27,21 @@ import com.fastjava.server.RequestLimits;
 import com.fastjava.server.ServletRouter;
 import com.fastjava.server.session.SessionConfig;
 import com.fastjava.server.session.SessionManager;
-import java.io.*;
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
-import java.time.ZonedDateTime;
-import java.util.*;
-import java.util.function.Supplier;
+import com.fastjava.servlet.AsyncContext;
+import com.fastjava.servlet.Cookie;
+import com.fastjava.servlet.Filter;
+import com.fastjava.servlet.FilterChain;
+import com.fastjava.servlet.HttpServlet;
+import com.fastjava.servlet.HttpServletRequest;
+import com.fastjava.servlet.HttpServletResponse;
+import com.fastjava.servlet.HttpSession;
+import com.fastjava.servlet.Part;
+import com.fastjava.servlet.RequestDispatcher;
+import com.fastjava.servlet.ServletException;
 
 /**
- * Concrete HttpServletRequest implementation.
- * Wraps ParsedHttpRequest with minimal overhead.
+ * Concrete HttpServletRequest implementation. Wraps ParsedHttpRequest with
+ * minimal overhead.
  */
 public class DefaultHttpServletRequest implements HttpServletRequest {
 
@@ -157,9 +177,9 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
     }
 
     private static final DateTimeFormatter[] DATE_FORMATS = {
-            DateTimeFormatter.RFC_1123_DATE_TIME,
-            DateTimeFormatter.ofPattern("EEEE, dd-MMM-yy HH:mm:ss zzz", java.util.Locale.US),
-            DateTimeFormatter.ofPattern("EEE MMM d HH:mm:ss yyyy", java.util.Locale.US)
+        DateTimeFormatter.RFC_1123_DATE_TIME,
+        DateTimeFormatter.ofPattern("EEEE, dd-MMM-yy HH:mm:ss zzz", java.util.Locale.US),
+        DateTimeFormatter.ofPattern("EEE MMM d HH:mm:ss yyyy", java.util.Locale.US)
     };
 
     @Override
@@ -275,8 +295,8 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
     }
 
     /**
-     * Parses multipart data using streaming parser.
-     * This allows large uploads to be processed incrementally.
+     * Parses multipart data using streaming parser. This allows large uploads
+     * to be processed incrementally.
      */
     private Collection<Part> getPartsStreaming() {
         List<Part> resolved = new ArrayList<>();
@@ -479,11 +499,10 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
     }
 
     /**
-     * Enables streaming multipart parsing for this request.
-     * This allows large file uploads to be processed incrementally from the network
-     * stream
+     * Enables streaming multipart parsing for this request. This allows large
+     * file uploads to be processed incrementally from the network stream
      * without requiring full buffering before boundary parsing.
-     * 
+     *
      * Call this before getParts() to enable streaming behavior.
      */
     public void enableStreamingMultipart() {
@@ -674,6 +693,7 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
     }
 
     private static final class DispatchSnapshot {
+
         private final String requestUri;
         private final String queryString;
 
@@ -692,6 +712,7 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
     }
 
     private final class InternalRequestDispatcher implements RequestDispatcher {
+
         private static final String FORWARD_REQUEST_URI = "javax.servlet.forward.request_uri";
         private static final String FORWARD_QUERY_STRING = "javax.servlet.forward.query_string";
         private static final String INCLUDE_REQUEST_URI = "javax.servlet.include.request_uri";
@@ -745,6 +766,7 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
     }
 
     private static final class IncludeResponseWrapper implements HttpServletResponse {
+
         private final HttpServletResponse delegate;
 
         private IncludeResponseWrapper(HttpServletResponse delegate) {
@@ -842,6 +864,7 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
     }
 
     private static final class LocalFilterChain implements FilterChain {
+
         private final List<Filter> filters;
         private final HttpServlet servlet;
         private int index;

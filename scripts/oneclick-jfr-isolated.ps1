@@ -73,9 +73,11 @@ function Wait-ForTcpPort {
                 $client.EndConnect($iar)
                 return $true
             }
-        } catch {
+        }
+        catch {
             Start-Sleep -Milliseconds 200
-        } finally {
+        }
+        finally {
             if ($client) { $client.Close() }
         }
     }

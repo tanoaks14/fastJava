@@ -11,10 +11,11 @@ import java.util.Map;
 import java.util.Map.Entry;
 
 /**
- * Represents a parsed HTTP request with minimal overhead.
- * Direct access to buffer for zero-copy operations when possible.
+ * Represents a parsed HTTP request with minimal overhead. Direct access to
+ * buffer for zero-copy operations when possible.
  */
 public class ParsedHttpRequest {
+
     private static final String HEADER_CONTENT_LENGTH = "content-length";
     private static final String HEADER_CONTENT_TYPE = "content-type";
     private static final String HEADER_TRANSFER_ENCODING = "transfer-encoding";

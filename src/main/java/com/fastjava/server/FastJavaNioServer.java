@@ -465,7 +465,7 @@ public class FastJavaNioServer {
             SocketChannel ch = handler.channel();
             ch.configureBlocking(false);
             Selector targetSelector = getSelectorForConnection();
-                SelectionKey key = ch.register(
+            SelectionKey key = ch.register(
                     targetSelector,
                     SelectionKey.OP_READ,
                     new NioConnection(ch, requestLimits, handler, protocolMode));
@@ -3532,7 +3532,6 @@ public class FastJavaNioServer {
     }
 
     // ===== Multi-Selector Architecture Support Methods =====
-
     Selector getSelectorForConnection() {
         if (selectorGroup != null) {
             return selectorGroup.getNextSelectorForConnection();

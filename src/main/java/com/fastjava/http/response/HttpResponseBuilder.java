@@ -1,12 +1,15 @@
 package com.fastjava.http.response;
 
-import com.fastjava.http.simd.SIMDVectorOps;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+
+import com.fastjava.http.simd.SIMDVectorOps;
 
 /**
- * Fast HTTP response builder with minimal allocations.
- * Pre-allocates buffers and uses efficient byte operations.
+ * Fast HTTP response builder with minimal allocations. Pre-allocates buffers
+ * and uses efficient byte operations.
  */
 public class HttpResponseBuilder {
 
@@ -22,15 +25,16 @@ public class HttpResponseBuilder {
     // Pre-encoded "HeaderName: " bytes (name + colon + space) to avoid per-call
     // String.getBytes() allocations for common HTTP header names.
     private static final Map<String, byte[]> HEADER_PREFIX_BYTES;
+
     static {
         String[] common = {
-                "Content-Type", "Content-Length", "Transfer-Encoding", "Connection",
-                "Cache-Control", "Server", "Date", "Accept-Ranges", "ETag",
-                "Last-Modified", "Location", "Set-Cookie", "Vary", "Allow",
-                "Access-Control-Allow-Origin", "Access-Control-Allow-Headers",
-                "Access-Control-Allow-Methods", "Access-Control-Max-Age",
-                "Content-Encoding", "Keep-Alive", "Content-Range", "WWW-Authenticate",
-                "Retry-After", "Upgrade", "X-Content-Type-Options", "X-Frame-Options"
+            "Content-Type", "Content-Length", "Transfer-Encoding", "Connection",
+            "Cache-Control", "Server", "Date", "Accept-Ranges", "ETag",
+            "Last-Modified", "Location", "Set-Cookie", "Vary", "Allow",
+            "Access-Control-Allow-Origin", "Access-Control-Allow-Headers",
+            "Access-Control-Allow-Methods", "Access-Control-Max-Age",
+            "Content-Encoding", "Keep-Alive", "Content-Range", "WWW-Authenticate",
+            "Retry-After", "Upgrade", "X-Content-Type-Options", "X-Frame-Options"
         };
         Map<String, byte[]> m = new HashMap<>(common.length * 2);
         for (String h : common) {
@@ -100,8 +104,8 @@ public class HttpResponseBuilder {
     }
 
     /**
-     * Release the buffer back to the pool if it was pooled. Called after response
-     * is sent.
+     * Release the buffer back to the pool if it was pooled. Called after
+     * response is sent.
      */
     public void release() {
         if (pooledBuffer && buffer != null) {
@@ -145,32 +149,32 @@ public class HttpResponseBuilder {
     private byte[][] buildSegments(boolean chunkedResponse, Long explicitContentLength, boolean streamingChunked) {
         byte[] bodyBytes = body != null ? body : EMPTY_BYTES;
         boolean chunked = streamingChunked || chunkedResponse
-            || hasHeaderIgnoreCase(HEADER_TRANSFER_ENCODING, "chunked");
+                || hasHeaderIgnoreCase(HEADER_TRANSFER_ENCODING, "chunked");
         byte[] headerBytes = buildHeaderBytesInternal(chunkedResponse, explicitContentLength, streamingChunked);
 
         if (!chunked) {
             if (bodyBytes.length == 0) {
-                return new byte[][] { headerBytes };
+                return new byte[][]{headerBytes};
             }
-            return new byte[][] { headerBytes, bodyBytes };
+            return new byte[][]{headerBytes, bodyBytes};
         }
 
         if (streamingChunked) {
-            return new byte[][] { headerBytes };
+            return new byte[][]{headerBytes};
         }
 
         if (bodyBytes.length == 0) {
-            return new byte[][] { headerBytes, CHUNK_TERMINATOR };
+            return new byte[][]{headerBytes, CHUNK_TERMINATOR};
         }
 
         byte[] chunkPrefix = createChunkPrefix(bodyBytes.length);
 
-        return new byte[][] {
-                headerBytes,
-                chunkPrefix,
-                bodyBytes,
-                CRLF,
-                CHUNK_TERMINATOR
+        return new byte[][]{
+            headerBytes,
+            chunkPrefix,
+            bodyBytes,
+            CRLF,
+            CHUNK_TERMINATOR
         };
     }
 
@@ -284,7 +288,8 @@ public class HttpResponseBuilder {
     }
 
     /**
-     * Write a non-negative long as ASCII decimal bytes directly into the buffer.
+     * Write a non-negative long as ASCII decimal bytes directly into the
+     * buffer.
      */
     private void appendDecimalLong(long value) {
         if (value == 0) {
@@ -409,30 +414,52 @@ public class HttpResponseBuilder {
 
     private String getStatusMessage(int code) {
         return switch (code) {
-            case 200 -> "OK";
-            case 201 -> "Created";
-            case 204 -> "No Content";
-            case 206 -> "Partial Content";
-            case 301 -> "Moved Permanently";
-            case 302 -> "Found";
-            case 304 -> "Not Modified";
-            case 400 -> "Bad Request";
-            case 401 -> "Unauthorized";
-            case 403 -> "Forbidden";
-            case 404 -> "Not Found";
-            case 405 -> "Method Not Allowed";
-            case 408 -> "Request Timeout";
-            case 413 -> "Payload Too Large";
-            case 416 -> "Range Not Satisfiable";
-            case 414 -> "URI Too Long";
-            case 431 -> "Request Header Fields Too Large";
-            case 500 -> "Internal Server Error";
-            case 501 -> "Not Implemented";
-            case 503 -> "Service Unavailable";
-            default -> "Unknown";
+            case 200 ->
+                "OK";
+            case 201 ->
+                "Created";
+            case 204 ->
+                "No Content";
+            case 206 ->
+                "Partial Content";
+            case 301 ->
+                "Moved Permanently";
+            case 302 ->
+                "Found";
+            case 304 ->
+                "Not Modified";
+            case 400 ->
+                "Bad Request";
+            case 401 ->
+                "Unauthorized";
+            case 403 ->
+                "Forbidden";
+            case 404 ->
+                "Not Found";
+            case 405 ->
+                "Method Not Allowed";
+            case 408 ->
+                "Request Timeout";
+            case 413 ->
+                "Payload Too Large";
+            case 416 ->
+                "Range Not Satisfiable";
+            case 414 ->
+                "URI Too Long";
+            case 431 ->
+                "Request Header Fields Too Large";
+            case 500 ->
+                "Internal Server Error";
+            case 501 ->
+                "Not Implemented";
+            case 503 ->
+                "Service Unavailable";
+            default ->
+                "Unknown";
         };
     }
 
     private record HeaderValue(String name, String value) {
+
     }
 }
