@@ -177,10 +177,10 @@ public final class DemoBackendApplication {
             }
             items.append(']');
 
-            String body = "{" +
-                    "\"count\":" + snapshot.size() + ',' +
-                    "\"items\":" + items +
-                    '}';
+            String body = "{"
+                    + "\"count\":" + snapshot.size() + ','
+                    + "\"items\":" + items
+                    + '}';
             writeJson(response, 200, body);
         }
 
@@ -257,12 +257,12 @@ public final class DemoBackendApplication {
             session.setAttribute("visitCount", nextVisit);
             session.setAttribute("lastSeen", Instant.now().toString());
 
-            String body = "{" +
-                    "\"sessionId\":" + jsonString(session.getId()) + ',' +
-                    "\"isNew\":" + session.isNew() + ',' +
-                    "\"visitCount\":" + nextVisit + ',' +
-                    "\"lastSeen\":" + jsonString(String.valueOf(session.getAttribute("lastSeen"))) +
-                    '}';
+            String body = "{"
+                    + "\"sessionId\":" + jsonString(session.getId()) + ','
+                    + "\"isNew\":" + session.isNew() + ','
+                    + "\"visitCount\":" + nextVisit + ','
+                    + "\"lastSeen\":" + jsonString(String.valueOf(session.getAttribute("lastSeen")))
+                    + '}';
             writeJson(response, 200, body);
         }
     }
@@ -287,11 +287,11 @@ public final class DemoBackendApplication {
             Thread worker = new Thread(() -> {
                 try {
                     Thread.sleep(150);
-                    writeJson(response, 200, "{" +
-                            "\"mode\":\"async\"," +
-                            "\"thread\":" + jsonString(Thread.currentThread().getName()) + ',' +
-                            "\"timestamp\":" + jsonString(Instant.now().toString()) +
-                            '}');
+                    writeJson(response, 200, "{"
+                            + "\"mode\":\"async\","
+                            + "\"thread\":" + jsonString(Thread.currentThread().getName()) + ','
+                            + "\"timestamp\":" + jsonString(Instant.now().toString())
+                            + '}');
                 } catch (InterruptedException interruptedException) {
                     Thread.currentThread().interrupt();
                     response.setStatus(500);
@@ -372,11 +372,11 @@ public final class DemoBackendApplication {
             }
             items.append(']');
 
-            String body = "{" +
-                    "\"contentType\":" + nullableJsonString(request.getContentType()) + ',' +
-                    "\"partCount\":" + parts.size() + ',' +
-                    "\"parts\":" + items +
-                    '}';
+            String body = "{"
+                    + "\"contentType\":" + nullableJsonString(request.getContentType()) + ','
+                    + "\"partCount\":" + parts.size() + ','
+                    + "\"parts\":" + items
+                    + '}';
             writeJson(response, 200, body);
         }
 
@@ -387,13 +387,13 @@ public final class DemoBackendApplication {
         }
     }
 
-        private static final class WebSocketLandingServlet extends HttpServlet {
+    private static final class WebSocketLandingServlet extends HttpServlet {
 
-                @Override
-                protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
-                        String room = extractRoom(request.getRequestURI());
-                        String websocketUrl = "ws://" + request.getHeader("Host") + "/ws/demo/" + room;
-                        String body = """
+        @Override
+        protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
+            String room = extractRoom(request.getRequestURI());
+            String websocketUrl = "ws://" + request.getHeader("Host") + "/ws/demo/" + room;
+            String body = """
                                         <!DOCTYPE html>
                                         <html lang="en">
                                         <head>
@@ -512,28 +512,28 @@ public final class DemoBackendApplication {
                                         </body>
                                         </html>
                                         """
-                                        .replace("%ROOM%", escapeHtml(room))
-                                        .replace("%WS_URL%", escapeHtml(websocketUrl))
-                                        .replace("%WS_URL_JSON%", jsonString(websocketUrl));
+                    .replace("%ROOM%", escapeHtml(room))
+                    .replace("%WS_URL%", escapeHtml(websocketUrl))
+                    .replace("%WS_URL_JSON%", jsonString(websocketUrl));
 
-                        response.setStatus(200);
-                        response.setContentType("text/html; charset=utf-8");
-                        response.getWriter().write(body);
-                }
-
-                private String extractRoom(String requestUri) {
-                        String prefix = "/ws/demo/";
-                        if (requestUri == null || !requestUri.startsWith(prefix) || requestUri.length() == prefix.length()) {
-                                return "demo";
-                        }
-                        String room = requestUri.substring(prefix.length());
-                        int nextSlash = room.indexOf('/');
-                        if (nextSlash >= 0) {
-                                room = room.substring(0, nextSlash);
-                        }
-                        return room.isBlank() ? "demo" : room;
-                }
+            response.setStatus(200);
+            response.setContentType("text/html; charset=utf-8");
+            response.getWriter().write(body);
         }
+
+        private String extractRoom(String requestUri) {
+            String prefix = "/ws/demo/";
+            if (requestUri == null || !requestUri.startsWith(prefix) || requestUri.length() == prefix.length()) {
+                return "demo";
+            }
+            String room = requestUri.substring(prefix.length());
+            int nextSlash = room.indexOf('/');
+            if (nextSlash >= 0) {
+                room = room.substring(0, nextSlash);
+            }
+            return room.isBlank() ? "demo" : room;
+        }
+    }
 
     @WebSocketEndpoint(path = "/ws/demo/{room}")
     public static final class DemoChatSocket {
@@ -615,12 +615,12 @@ public final class DemoBackendApplication {
     }
 
     private static String todoToJson(TodoItem item) {
-        return "{" +
-                "\"id\":" + item.id() + ',' +
-                "\"text\":" + jsonString(item.text()) + ',' +
-                "\"done\":" + item.done() + ',' +
-                "\"createdAt\":" + jsonString(item.createdAt()) +
-                '}';
+        return "{"
+                + "\"id\":" + item.id() + ','
+                + "\"text\":" + jsonString(item.text()) + ','
+                + "\"done\":" + item.done() + ','
+                + "\"createdAt\":" + jsonString(item.createdAt())
+                + '}';
     }
 
     private static String nullableJsonString(String value) {
@@ -644,11 +644,16 @@ public final class DemoBackendApplication {
         for (int index = 0; index < source.length(); index++) {
             char ch = source.charAt(index);
             switch (ch) {
-                case '\\' -> escaped.append("\\\\");
-                case '"' -> escaped.append("\\\"");
-                case '\n' -> escaped.append("\\n");
-                case '\r' -> escaped.append("\\r");
-                case '\t' -> escaped.append("\\t");
+                case '\\' ->
+                    escaped.append("\\\\");
+                case '"' ->
+                    escaped.append("\\\"");
+                case '\n' ->
+                    escaped.append("\\n");
+                case '\r' ->
+                    escaped.append("\\r");
+                case '\t' ->
+                    escaped.append("\\t");
                 default -> {
                     if (ch < 0x20) {
                         escaped.append(String.format("\\u%04x", (int) ch));
@@ -663,5 +668,6 @@ public final class DemoBackendApplication {
     }
 
     private record TodoItem(long id, String text, boolean done, String createdAt) {
+
     }
 }
