@@ -97,12 +97,21 @@ function Start-OptimizedLoad {
     Write-Host "  Running $DurationSeconds second load test with $Concurrency concurrent threads"
     Write-Host "  Warmup: $WarmupSeconds seconds"
     
-    $output = & java -cp $Classpath `
-        com.fastjava.bench.profile.DurationBasedHttpLoadGenerator `
-        "$Url" `
-        $DurationSeconds `
-        $Concurrency `
-        $WarmupSeconds 2>&1
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # The load generator may write progress lines to stderr; do not fail the
+        # profiling pipeline when that happens.
+        $ErrorActionPreference = "Continue"
+        $output = & java -cp $Classpath `
+            com.fastjava.bench.profile.DurationBasedHttpLoadGenerator `
+            "$Url" `
+            $DurationSeconds `
+            $Concurrency `
+            $WarmupSeconds 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     
     return $output
 }

@@ -131,7 +131,7 @@ public class FastJavaNioServer {
     private static final long IDLE_CHECK_INTERVAL_MS = 1_000L;
     // Write timeout enforcement must stay responsive for slow-reader protection.
     private static final long WRITE_TIMEOUT_CHECK_INTERVAL_MS = 200L;
-    private static final int NUM_SELECTORS = Integer.getInteger("fastjava.num.selectors", 1);
+    private static final int NUM_SELECTORS = Integer.getInteger("fastjava.num.selectors", 4);
 
     private Selector selector;
     private ServerSocketChannel serverSocketChannel;
@@ -1727,6 +1727,18 @@ public class FastJavaNioServer {
             ServerObservability.recordRequestBytesReceived(parsed.bytesConsumed);
             connection.consume(parsed.bytesConsumed);
             boolean closeAfterWrite = parsed.closeAfterResponse();
+            boolean canBypassCompletionOrdering = requestSequence == connection.nextResponseSequence()
+                && connection.inFlightRequestCount() == 0
+                && !connection.hasBufferedCompletions();
+            if (canBypassCompletionOrdering) {
+            connection.releaseReservedRequestSequence();
+            queueResponse(
+                key,
+                connection,
+                staticResponse.response(closeAfterWrite),
+                closeAfterWrite);
+            return;
+            }
             enqueueImmediateCompletion(
                     key,
                     connection,
@@ -3052,6 +3064,14 @@ public class FastJavaNioServer {
 
         private int inFlightRequestCount() {
             return inFlightRequests;
+        }
+
+        private long nextResponseSequence() {
+            return nextResponseSequence;
+        }
+
+        private boolean hasBufferedCompletions() {
+            return completedResponses != null && !completedResponses.isEmpty();
         }
 
         private long nextRequestSequence() {
