@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -17,6 +18,7 @@ import com.fastjava.http.filter.CorsFilter;
 import com.fastjava.http.filter.GzipFilter;
 import com.fastjava.server.FastJavaNioServer;
 import com.fastjava.server.RequestLimits;
+import com.fastjava.server.tls.TlsConfig;
 import com.fastjava.servlet.AsyncContext;
 import com.fastjava.servlet.AsyncEvent;
 import com.fastjava.servlet.AsyncListener;
@@ -49,23 +51,24 @@ public final class DemoBackendApplication {
     }
 
     public static void main(String[] args) throws Exception {
-        int port = args.length > 0 ? Integer.parseInt(args[0]) : 9090;
-        Path staticRoot = args.length > 1 ? Path.of(args[1]) : Path.of("static");
+        DemoRuntimeConfig config = DemoRuntimeConfig.parse(args);
 
-        FastJavaNioServer server = new FastJavaNioServer(port, RequestLimits.defaults(256 * 1024));
+        FastJavaNioServer server = config.tlsConfig() == null
+            ? new FastJavaNioServer(config.port(), RequestLimits.defaults(256 * 1024))
+            : new FastJavaNioServer(config.port(), RequestLimits.defaults(256 * 1024), config.tlsConfig());
         server.addFilter(new CorsFilter(Set.of("*")));
         server.addFilter(new GzipFilter());
 
         server.addStaticPlainTextRoute("/healthz", "ok");
-        server.addServlet("/", new DemoIndexServlet(port, staticRoot));
-        server.addServlet("/api/info", new InfoServlet(port, staticRoot));
+        server.addServlet("/", new DemoIndexServlet(config));
+        server.addServlet("/api/info", new InfoServlet(config));
         server.addServlet("/api/todos", new TodoServlet());
         server.addServlet("/api/session", new SessionServlet());
         server.addServlet("/api/async/time", new AsyncTimeServlet());
         server.addServlet("/api/sse/ticks", new TickSseServlet());
         server.addServlet("/api/upload", new UploadServlet());
-        server.addServletPattern("/ws/demo/*", new WebSocketLandingServlet());
-        server.addServletPattern("/assets/*", new StaticFileServlet(staticRoot, "/assets"));
+        server.addServletPattern("/ws/demo/*", new WebSocketLandingServlet(config));
+        server.addServletPattern("/assets/*", new StaticFileServlet(config.staticRoot(), "/assets"));
         server.addWebSocketEndpoint(DemoChatSocket.class);
 
         server.start();
@@ -75,12 +78,10 @@ public final class DemoBackendApplication {
 
     private static final class DemoIndexServlet extends HttpServlet {
 
-        private final int port;
-        private final Path staticRoot;
+        private final DemoRuntimeConfig config;
 
-        private DemoIndexServlet(int port, Path staticRoot) {
-            this.port = port;
-            this.staticRoot = staticRoot;
+        private DemoIndexServlet(DemoRuntimeConfig config) {
+            this.config = config;
         }
 
         @Override
@@ -90,6 +91,8 @@ public final class DemoBackendApplication {
                       "name": "fastjava-demo-backend",
                       "description": "Demo backend for FastJava NIO server features",
                       "port": %PORT%,
+                      "scheme": %SCHEME%,
+                      "tlsEnabled": %TLS_ENABLED%,
                       "staticRoot": %STATIC_ROOT%,
                       "routes": [
                         {"path":"/healthz","feature":"static fast route"},
@@ -104,20 +107,20 @@ public final class DemoBackendApplication {
                       ]
                     }
                     """
-                    .replace("%PORT%", Integer.toString(port))
-                    .replace("%STATIC_ROOT%", jsonString(staticRoot.toAbsolutePath().normalize().toString()));
+                    .replace("%PORT%", Integer.toString(config.port()))
+                    .replace("%SCHEME%", jsonString(config.httpScheme()))
+                    .replace("%TLS_ENABLED%", Boolean.toString(config.tlsEnabled()))
+                    .replace("%STATIC_ROOT%", jsonString(config.staticRoot().toAbsolutePath().normalize().toString()));
             writeJson(response, 200, body);
         }
     }
 
     private static final class InfoServlet extends HttpServlet {
 
-        private final int port;
-        private final Path staticRoot;
+        private final DemoRuntimeConfig config;
 
-        private InfoServlet(int port, Path staticRoot) {
-            this.port = port;
-            this.staticRoot = staticRoot;
+        private InfoServlet(DemoRuntimeConfig config) {
+            this.config = config;
         }
 
         @Override
@@ -145,6 +148,8 @@ public final class DemoBackendApplication {
                       },
                       "runtime": {
                         "port": %PORT%,
+                                                "scheme": %SCHEME%,
+                                                "tlsEnabled": %TLS_ENABLED%,
                         "staticRoot": %STATIC_ROOT%,
                         "timestamp": %TIMESTAMP%
                       }
@@ -153,8 +158,10 @@ public final class DemoBackendApplication {
                     .replace("%METHOD%", jsonString(request.getMethod()))
                     .replace("%PATH%", jsonString(request.getRequestURI()))
                     .replace("%QUERY%", nullableJsonString(request.getQueryString()))
-                    .replace("%PORT%", Integer.toString(port))
-                    .replace("%STATIC_ROOT%", jsonString(staticRoot.toAbsolutePath().normalize().toString()))
+                    .replace("%PORT%", Integer.toString(config.port()))
+                    .replace("%SCHEME%", jsonString(config.httpScheme()))
+                    .replace("%TLS_ENABLED%", Boolean.toString(config.tlsEnabled()))
+                    .replace("%STATIC_ROOT%", jsonString(config.staticRoot().toAbsolutePath().normalize().toString()))
                     .replace("%TIMESTAMP%", jsonString(Instant.now().toString()));
             writeJson(response, 200, body);
         }
@@ -389,10 +396,16 @@ public final class DemoBackendApplication {
 
     private static final class WebSocketLandingServlet extends HttpServlet {
 
+        private final DemoRuntimeConfig config;
+
+        private WebSocketLandingServlet(DemoRuntimeConfig config) {
+            this.config = config;
+        }
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             String room = extractRoom(request.getRequestURI());
-            String websocketUrl = "ws://" + request.getHeader("Host") + "/ws/demo/" + room;
+            String websocketUrl = config.websocketScheme() + "://" + request.getHeader("Host") + "/ws/demo/" + room;
             String body = """
                                         <!DOCTYPE html>
                                         <html lang="en">
@@ -459,6 +472,7 @@ public final class DemoBackendApplication {
                                             <main>
                                                 <h1>FastJava WebSocket Demo</h1>
                                                 <p>This page is the HTTP companion for the WebSocket endpoint. Opening <code>/ws/demo/{room}</code> in a browser tab does not perform a WebSocket upgrade by itself, so this tester opens the socket in JavaScript.</p>
+                                                <p>Transport: <strong>%TRANSPORT%</strong></p>
                                                 <p>Room: <strong>%ROOM%</strong></p>
                                                 <p>Socket URL: <code>%WS_URL%</code></p>
                                                 <div class="row">
@@ -512,6 +526,7 @@ public final class DemoBackendApplication {
                                         </body>
                                         </html>
                                         """
+                                        .replace("%TRANSPORT%", config.tlsEnabled() ? "TLS / WSS" : "plain HTTP / WS")
                     .replace("%ROOM%", escapeHtml(room))
                     .replace("%WS_URL%", escapeHtml(websocketUrl))
                     .replace("%WS_URL_JSON%", jsonString(websocketUrl));
@@ -665,6 +680,70 @@ public final class DemoBackendApplication {
         }
         escaped.append('"');
         return escaped.toString();
+    }
+
+    private record DemoRuntimeConfig(int port, Path staticRoot, TlsConfig tlsConfig) {
+
+        private static DemoRuntimeConfig parse(String[] args) {
+            int port = 9090;
+            Path staticRoot = Path.of("static");
+            Path keystore = null;
+            String password = null;
+
+            int positionalIndex = 0;
+            for (int index = 0; index < args.length; index++) {
+                String arg = args[index];
+                switch (arg) {
+                    case "--tls-keystore" -> {
+                        requireValue(args, index, arg);
+                        keystore = Path.of(args[++index]);
+                    }
+                    case "--tls-password" -> {
+                        requireValue(args, index, arg);
+                        password = args[++index];
+                    }
+                    default -> {
+                        if (arg.startsWith("--")) {
+                            throw new IllegalArgumentException("Unknown argument: " + arg);
+                        }
+                        switch (positionalIndex) {
+                            case 0 -> port = Integer.parseInt(arg);
+                            case 1 -> staticRoot = Path.of(arg);
+                            default -> throw new IllegalArgumentException("Unexpected positional argument: " + arg);
+                        }
+                        positionalIndex++;
+                    }
+                }
+            }
+
+            if ((keystore == null) != (password == null)) {
+                throw new IllegalArgumentException("TLS requires both --tls-keystore and --tls-password");
+            }
+
+            if (keystore == null) {
+                return new DemoRuntimeConfig(port, staticRoot, null);
+            }
+            String tlsPassword = Objects.requireNonNull(password, "TLS password is required when TLS is enabled");
+            return new DemoRuntimeConfig(port, staticRoot, TlsConfig.defaults(keystore, tlsPassword.toCharArray()));
+        }
+
+        private boolean tlsEnabled() {
+            return tlsConfig != null;
+        }
+
+        private String httpScheme() {
+            return tlsEnabled() ? "https" : "http";
+        }
+
+        private String websocketScheme() {
+            return tlsEnabled() ? "wss" : "ws";
+        }
+
+        private static void requireValue(String[] args, int index, String option) {
+            if (index + 1 >= args.length) {
+                throw new IllegalArgumentException("Missing value for " + option);
+            }
+        }
     }
 
     private record TodoItem(long id, String text, boolean done, String createdAt) {

@@ -135,6 +135,15 @@ $cp = "target/classes;$(Get-Content target/demo.classpath -Raw)"
 java --add-modules jdk.incubator.vector -cp $cp com.fastjava.examples.DemoBackendApplication 9090 ./static
 ```
 
+HTTPS demo with TLS enabled:
+
+```powershell
+keytool -genkeypair -keyalg RSA -keysize 2048 -validity 365 -alias fastjava-demo -storetype PKCS12 -keystore keystore.p12 -storepass changeit -dname "CN=localhost"
+java --add-modules jdk.incubator.vector -cp $cp com.fastjava.examples.DemoBackendApplication 9443 ./static --tls-keystore .\keystore.p12 --tls-password changeit
+```
+
+When TLS is enabled, the demo serves over `https://localhost:9443` and the WebSocket tester page automatically uses `wss://`.
+
 Core demo endpoints:
 
 - `GET /healthz` for the static fast route

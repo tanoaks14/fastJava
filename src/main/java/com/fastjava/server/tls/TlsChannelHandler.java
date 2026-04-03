@@ -55,6 +55,13 @@ public final class TlsChannelHandler {
     /** Scratch buffer for plaintext produced during the handshake unwrap steps. */
     private final ByteBuffer appIn;
 
+    /**
+     * Plaintext bytes produced during handshake unwrap that must be delivered to
+     * the first application reads.
+     */
+    private byte[] prefetchedAppData = new byte[0];
+    private int prefetchedAppOffset;
+
     private String negotiatedApplicationProtocol = "";
 
     public TlsChannelHandler(SocketChannel channel, SSLEngine engine) {
@@ -77,6 +84,14 @@ public final class TlsChannelHandler {
 
     public String negotiatedApplicationProtocol() {
         return negotiatedApplicationProtocol;
+    }
+
+    /**
+     * @return true when handshake/read buffers already contain data that should be
+     *         consumed without waiting for another socket readability event.
+     */
+    public boolean hasBufferedInput() {
+        return (prefetchedAppData.length - prefetchedAppOffset) > 0 || netIn.hasRemaining();
     }
 
     // -------------------------------------------------------------------------
@@ -123,6 +138,7 @@ public final class TlsChannelHandler {
                     netIn.flip();
                     appIn.clear();
                     SSLEngineResult result = engine.unwrap(netIn, appIn);
+                    stashHandshakePlaintext();
                     status = result.getHandshakeStatus();
                     if (result.getStatus() == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
                         // Need more network data — loop will read again.
@@ -158,6 +174,11 @@ public final class TlsChannelHandler {
      * @throws IOException on I/O or TLS error
      */
     public int read(ByteBuffer appDst) throws IOException {
+        int prefetchedCopied = drainPrefetchedPlaintext(appDst);
+        if (prefetchedCopied > 0) {
+            return prefetchedCopied;
+        }
+
         // compact() shifts any leftover (partial TLS record) to the front
         // and switches to write mode so channel.read() can append new bytes.
         netIn.compact();
@@ -168,15 +189,59 @@ public final class TlsChannelHandler {
             return channelBytesRead < 0 ? -1 : 0;
         }
 
-        SSLEngineResult result = engine.unwrap(netIn, appDst);
-        int produced = result.bytesProduced();
-        return switch (result.getStatus()) {
-            case OK -> produced;
-            case CLOSED -> produced > 0 ? produced : -1;
-            case BUFFER_UNDERFLOW -> 0; // partial TLS record — need more network bytes
-            case BUFFER_OVERFLOW ->
-                throw new IOException("TLS appDst buffer overflow — increase request buffer size");
-        };
+        int producedTotal = 0;
+        while (netIn.hasRemaining() && appDst.hasRemaining()) {
+            SSLEngineResult result = engine.unwrap(netIn, appDst);
+            producedTotal += result.bytesProduced();
+            switch (result.getStatus()) {
+                case OK -> {
+                    // Continue draining already-buffered TLS records if possible.
+                    if (result.bytesConsumed() == 0 && result.bytesProduced() == 0) {
+                        return producedTotal;
+                    }
+                }
+                case CLOSED -> {
+                    return producedTotal > 0 ? producedTotal : -1;
+                }
+                case BUFFER_UNDERFLOW -> {
+                    return producedTotal > 0 ? producedTotal : (channelBytesRead < 0 ? -1 : 0);
+                }
+                case BUFFER_OVERFLOW ->
+                    throw new IOException("TLS appDst buffer overflow — increase request buffer size");
+            }
+        }
+        return producedTotal > 0 ? producedTotal : (channelBytesRead < 0 ? -1 : 0);
+    }
+
+    private void stashHandshakePlaintext() {
+        if (appIn.position() <= 0) {
+            return;
+        }
+        appIn.flip();
+        int produced = appIn.remaining();
+        int existing = prefetchedAppData.length - prefetchedAppOffset;
+        byte[] merged = new byte[existing + produced];
+        if (existing > 0) {
+            System.arraycopy(prefetchedAppData, prefetchedAppOffset, merged, 0, existing);
+        }
+        appIn.get(merged, existing, produced);
+        prefetchedAppData = merged;
+        prefetchedAppOffset = 0;
+    }
+
+    private int drainPrefetchedPlaintext(ByteBuffer appDst) {
+        int available = prefetchedAppData.length - prefetchedAppOffset;
+        if (available <= 0 || !appDst.hasRemaining()) {
+            return 0;
+        }
+        int toCopy = Math.min(available, appDst.remaining());
+        appDst.put(prefetchedAppData, prefetchedAppOffset, toCopy);
+        prefetchedAppOffset += toCopy;
+        if (prefetchedAppOffset >= prefetchedAppData.length) {
+            prefetchedAppData = new byte[0];
+            prefetchedAppOffset = 0;
+        }
+        return toCopy;
     }
 
     /**

@@ -487,6 +487,13 @@ public class FastJavaNioServer {
                     new NioConnection(ch, requestLimits, handler, protocolMode));
             ServerObservability.connectionOpened();
             registerConnectionForWriting(key);
+            if (handler.hasBufferedInput()) {
+                try {
+                    handleRead(key);
+                } catch (IOException ioException) {
+                    closeKey(key);
+                }
+            }
         }
     }
 
