@@ -39,7 +39,9 @@ Param(
     [string]$OutputDir       = "target/profiles",
     [string]$Name            = "",
     [ValidateSet("default","profile")]
-    [string]$EventProfile    = "profile"
+    [string]$EventProfile    = "profile",
+    [string]$ExecutionSamplePeriod = "",
+    [string]$NativeSamplePeriod = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,12 +73,30 @@ $heapFile = Join-Path $OutputDir "$Name-heap.txt"
 # Use absolute path for JFR (jcmd needs it)
 $jfrAbs = (Resolve-Path -LiteralPath (Split-Path $jfrFile -Parent)).Path + "\" + (Split-Path $jfrFile -Leaf)
 
+$settingsRef = $EventProfile
+$generatedSettingsFile = ""
+if (![string]::IsNullOrWhiteSpace($ExecutionSamplePeriod) -or ![string]::IsNullOrWhiteSpace($NativeSamplePeriod)) {
+    $generatedSettingsFile = Join-Path $OutputDir ("{0}.jfc" -f $Name)
+    $configureArgs = @("configure", "--input", $EventProfile, "--output", $generatedSettingsFile)
+    if (![string]::IsNullOrWhiteSpace($ExecutionSamplePeriod)) {
+        $configureArgs += "jdk.ExecutionSample#period=$ExecutionSamplePeriod"
+    }
+    if (![string]::IsNullOrWhiteSpace($NativeSamplePeriod)) {
+        $configureArgs += "jdk.NativeMethodSample#period=$NativeSamplePeriod"
+    }
+    & jfr @configureArgs | Out-Null
+    if ($LASTEXITCODE -ne 0 -or !(Test-Path $generatedSettingsFile)) {
+        throw "Failed to generate custom JFR settings file"
+    }
+    $settingsRef = (Resolve-Path -LiteralPath $generatedSettingsFile).Path
+}
+
 # ── Start JFR recording ───────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "Starting JFR recording ($EventProfile, ${DurationSeconds}s) → $jfrAbs"
+Write-Host "Starting JFR recording ($settingsRef, ${DurationSeconds}s) → $jfrAbs"
 & jcmd $procId JFR.start `
     name=$Name `
-    settings=$EventProfile `
+    settings=$settingsRef `
     "duration=${DurationSeconds}s" `
     "filename=$jfrAbs"
 
@@ -108,6 +128,9 @@ Write-Host ""
 Write-Host "=== Capture complete ==="
 Write-Host "  JFR file    : $jfrAbs"
 Write-Host "  Heap histo  : $heapFile"
+if ($generatedSettingsFile -ne "") {
+    Write-Host "  JFR config  : $generatedSettingsFile"
+}
 Write-Host ""
 Write-Host "Next step - read results with:"
 Write-Host "  .\scripts\read-profile.ps1 -JfrFile $jfrAbs -HeapFile $heapFile"

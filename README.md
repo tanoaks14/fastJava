@@ -17,6 +17,40 @@ Lightweight HTTP server prototype focused on low-indirection internals and SIMD-
 | WebSocket on blocking path | Implemented | Blocking server now supports upgrade + frame loop parity with NIO v1 |
 | Hot deploy / classloader isolation | Implemented (v1) | `deployWebApp` / `undeployWebApp` with context-path mounting and per-app TCCL isolation |
 
+## Latest Cross-Framework Benchmark (2026-04-03)
+
+Scenario:
+- Endpoint: `GET /hello`
+- Warmup: `30000` requests
+- Benchmark: `150000` requests
+- Concurrency: `64`
+- Rounds: `5`
+- Execution model: isolated JVM per server
+
+Aggregate median results:
+
+| Server | Throughput (req/s) | Avg Latency (ms) | p95 (ms) | p99 (ms) | Errors |
+|---|---:|---:|---:|---:|---:|
+| FastJava | 106993.25 | 0.593 | 1.086 | 2.046 | 0 |
+| Undertow | 93112.02 | 0.680 | 1.294 | 2.364 | 0 |
+| Netty | 82846.07 | 0.766 | 1.573 | 2.676 | 0 |
+| Tomcat | 74225.89 | 0.859 | 1.793 | 2.655 | 0 |
+
+Winner by throughput median: **FastJava**
+
+Reproduce on Windows PowerShell:
+
+```powershell
+$env:JAVA_HOME = "d:\tools\jdk\jdk-25"
+$env:Path = "d:\tools\jdk\jdk-25\bin;" + $env:Path
+Remove-Item Env:JAVA_TOOL_OPTIONS -ErrorAction SilentlyContinue
+.\scripts\run-webserver-comparison.ps1
+```
+
+Latest raw output files:
+- `benchmarks/webserver-comparison/results/latest-results.md`
+- `benchmarks/webserver-comparison/results/latest-results.json`
+
 ## Quick Start
 
 ### Prerequisites

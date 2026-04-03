@@ -131,7 +131,23 @@ public class FastJavaNioServer {
     private static final long IDLE_CHECK_INTERVAL_MS = 1_000L;
     // Write timeout enforcement must stay responsive for slow-reader protection.
     private static final long WRITE_TIMEOUT_CHECK_INTERVAL_MS = 200L;
-    private static final int NUM_SELECTORS = Integer.getInteger("fastjava.num.selectors", 4);
+    private static final int NUM_SELECTORS = resolveSelectorCount();
+
+    private static int resolveSelectorCount() {
+        String configured = System.getProperty("fastjava.num.selectors");
+        if (configured != null && !configured.isBlank()) {
+            try {
+                int parsed = Integer.parseInt(configured.trim());
+                if (parsed > 0) {
+                    return parsed;
+                }
+            } catch (NumberFormatException ignored) {
+                // Fall through to auto sizing.
+            }
+        }
+        int cpus = Runtime.getRuntime().availableProcessors();
+        return Math.max(2, Math.min(8, (cpus + 1) / 2));
+    }
 
     private Selector selector;
     private ServerSocketChannel serverSocketChannel;
@@ -475,14 +491,21 @@ public class FastJavaNioServer {
     }
 
     void drainSelectorTasks() {
+        drainSelectorTasks(0);
+    }
+
+    int drainSelectorTasks(int maxTasks) {
+        int processed = 0;
         Runnable task;
-        while ((task = selectorTasks.poll()) != null) {
+        while ((maxTasks <= 0 || processed < maxTasks) && (task = selectorTasks.poll()) != null) {
             try {
                 task.run();
             } catch (RuntimeException taskError) {
                 logger.debug("Selector task failed: {}", taskError.getMessage());
             }
+            processed++;
         }
+        return processed;
     }
 
     private void submitSelectorTask(Runnable task) {

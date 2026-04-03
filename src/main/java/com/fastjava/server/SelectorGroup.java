@@ -30,6 +30,12 @@ final class SelectorGroup {
     private static final int COMPLETION_RING_CAPACITY = Integer.getInteger("fastjava.selectors.completion.ring", 8192);
     private static final int IDLE_SCAN_TICK_INTERVAL = Integer.getInteger("fastjava.selectors.idle.tick", 16);
     private static final int WRITE_TIMEOUT_SCAN_TICK_INTERVAL = Integer.getInteger("fastjava.selectors.write.tick", 4);
+        private static final int SELECT_TIMEOUT_MILLIS = Integer.getInteger("fastjava.selectors.select.timeout.ms", 100);
+        private static final int ACCEPTOR_PENDING_CHECK_INTERVAL
+            = Integer.getInteger("fastjava.selectors.acceptor.pending.check.interval", 8);
+        private static final int LOCAL_DRAIN_BATCH = Integer.getInteger("fastjava.selectors.local.drain.batch", 256);
+        private static final int ACCEPTOR_GLOBAL_DRAIN_BATCH
+            = Integer.getInteger("fastjava.selectors.acceptor.global.drain.batch", 512);
 
     private final int numSelectors;
     private final Selector[] selectors;
@@ -174,34 +180,56 @@ final class SelectorGroup {
         return idx == null ? -1 : idx;
     }
 
-    private void drainLocalTasks(int selectorIndex) {
+    private int drainLocalTasks(int selectorIndex, int maxTasks) {
+        int processed = 0;
         Runnable task;
-        while ((task = selectorLocalTasks[selectorIndex].poll()) != null) {
+        while ((maxTasks <= 0 || processed < maxTasks) && (task = selectorLocalTasks[selectorIndex].poll()) != null) {
             try {
                 task.run();
             } catch (RuntimeException taskError) {
                 logger.debug("Selector-local task failed: {}", taskError.getMessage());
             }
+            processed++;
         }
+        return processed;
     }
 
-    private void drainLocalCompletions(int selectorIndex) {
+    private int drainLocalCompletions(int selectorIndex, int maxCompletions) {
+        int processed = 0;
         FastJavaNioServer.NioCompletion completion;
-        while ((completion = selectorLocalCompletionRings[selectorIndex].poll()) != null) {
+        while ((maxCompletions <= 0 || processed < maxCompletions)
+                && (completion = selectorLocalCompletionRings[selectorIndex].poll()) != null) {
             try {
                 server.applyCompletion(completion);
             } catch (RuntimeException completionError) {
                 logger.debug("Selector-local completion failed: {}", completionError.getMessage());
             }
+            processed++;
         }
 
-        while ((completion = selectorLocalCompletionOverflow[selectorIndex].poll()) != null) {
+        while ((maxCompletions <= 0 || processed < maxCompletions)
+                && (completion = selectorLocalCompletionOverflow[selectorIndex].poll()) != null) {
             try {
                 server.applyCompletion(completion);
             } catch (RuntimeException completionError) {
                 logger.debug("Selector-local completion failed: {}", completionError.getMessage());
             }
+            processed++;
         }
+        return processed;
+    }
+
+    private int adaptiveTickInterval(int baseInterval, int selectedKeyCount, boolean hadLocalWork) {
+        if (baseInterval <= 0) {
+            return 0;
+        }
+        if (selectedKeyCount >= 256) {
+            return baseInterval * 4;
+        }
+        if (selectedKeyCount >= 128 || (hadLocalWork && selectedKeyCount >= 64)) {
+            return baseInterval * 2;
+        }
+        return baseInterval;
     }
 
     private void runSelectorLoop(int selectorIndex) {
@@ -212,42 +240,55 @@ final class SelectorGroup {
 
         try {
             while (running.get()) {
-                if (isAcceptor) {
-                    if (server.hasPendingWork()) {
-                        currentSelector.selectNow();
-                    } else {
-                        currentSelector.select(100);
-                    }
+                long tickBefore = selectorLoopTicks[selectorIndex];
+                boolean selectNow = selectorWakeupPending[selectorIndex].get();
+                if (!selectNow && isAcceptor && ACCEPTOR_PENDING_CHECK_INTERVAL > 0
+                        && (tickBefore % ACCEPTOR_PENDING_CHECK_INTERVAL) == 0
+                        && server.hasPendingWork()) {
+                    selectNow = true;
+                }
+                if (selectNow) {
+                    currentSelector.selectNow();
                 } else {
-                    if (!selectorLocalTasks[selectorIndex].isEmpty()) {
-                        currentSelector.selectNow();
-                    } else {
-                        currentSelector.select(100);
-                    }
+                    currentSelector.select(SELECT_TIMEOUT_MILLIS);
                 }
 
                 selectorWakeupPending[selectorIndex].set(false);
 
-                drainLocalCompletions(selectorIndex);
-                drainLocalTasks(selectorIndex);
+                int drainedLocalCompletions = drainLocalCompletions(selectorIndex, LOCAL_DRAIN_BATCH);
+                int localTaskBudget = LOCAL_DRAIN_BATCH <= 0
+                        ? 0
+                        : Math.max(1, LOCAL_DRAIN_BATCH - drainedLocalCompletions);
+                int drainedLocalTasks = drainLocalTasks(selectorIndex, localTaskBudget);
+                boolean hadLocalWork = drainedLocalCompletions > 0 || drainedLocalTasks > 0;
 
                 if (isAcceptor) {
                     server.drainPendingTlsRegistrations();
-                    server.drainSelectorTasks();
-                    server.applyCompletedExecutions(0);
+                    int globalTaskBudget = ACCEPTOR_GLOBAL_DRAIN_BATCH <= 0
+                            ? 0
+                            : Math.max(1, ACCEPTOR_GLOBAL_DRAIN_BATCH / 2);
+                    int drainedGlobalTasks = server.drainSelectorTasks(globalTaskBudget);
+                    int completionBudget = ACCEPTOR_GLOBAL_DRAIN_BATCH <= 0
+                            ? 0
+                            : Math.max(1, ACCEPTOR_GLOBAL_DRAIN_BATCH - drainedGlobalTasks);
+                    server.applyCompletedExecutions(completionBudget);
                 }
 
+                Set<SelectionKey> selectedKeys = currentSelector.selectedKeys();
+                int selectedKeyCount = selectedKeys.size();
                 long tick = ++selectorLoopTicks[selectorIndex];
-                boolean doIdleCheck = IDLE_SCAN_TICK_INTERVAL > 0
-                        && (tick % IDLE_SCAN_TICK_INTERVAL) == 0;
-                boolean doWriteTimeoutCheck = WRITE_TIMEOUT_SCAN_TICK_INTERVAL > 0
-                        && (tick % WRITE_TIMEOUT_SCAN_TICK_INTERVAL) == 0;
+                int idleTickInterval = adaptiveTickInterval(IDLE_SCAN_TICK_INTERVAL, selectedKeyCount, hadLocalWork);
+                int writeTickInterval = adaptiveTickInterval(
+                        WRITE_TIMEOUT_SCAN_TICK_INTERVAL,
+                        selectedKeyCount,
+                        hadLocalWork);
+                boolean doIdleCheck = idleTickInterval > 0 && (tick % idleTickInterval) == 0;
+                boolean doWriteTimeoutCheck = writeTickInterval > 0 && (tick % writeTickInterval) == 0;
                 if (doIdleCheck || doWriteTimeoutCheck) {
                     long nowMillis = System.currentTimeMillis();
                     server.expireIdleConnectionsOnSelector(currentSelector, nowMillis, doIdleCheck, doWriteTimeoutCheck);
                 }
 
-                Set<SelectionKey> selectedKeys = currentSelector.selectedKeys();
                 Iterator<SelectionKey> iterator = selectedKeys.iterator();
                 while (iterator.hasNext()) {
                     SelectionKey key = iterator.next();

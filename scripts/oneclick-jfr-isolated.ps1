@@ -50,6 +50,8 @@ Param(
     [string]$Name = "",
     [ValidateSet("default", "profile")]
     [string]$EventProfile = "profile",
+    [string]$ExecutionSamplePeriod = "",
+    [string]$NativeSamplePeriod = "",
     [int]$TopN = 20,
     [switch]$SkipBuild,
     [switch]$StaticRoute
@@ -201,7 +203,9 @@ try {
         -DurationSeconds $DurationSeconds `
         -OutputDir $OutputDir `
         -Name $Name `
-        -EventProfile $EventProfile
+        -EventProfile $EventProfile `
+        -ExecutionSamplePeriod $ExecutionSamplePeriod `
+        -NativeSamplePeriod $NativeSamplePeriod
 
     # Parse load results
     $totalOk = 0
