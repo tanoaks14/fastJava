@@ -30,11 +30,11 @@ final class SelectorGroup {
     private static final int COMPLETION_RING_CAPACITY = Integer.getInteger("fastjava.selectors.completion.ring", 8192);
     private static final int IDLE_SCAN_TICK_INTERVAL = Integer.getInteger("fastjava.selectors.idle.tick", 16);
     private static final int WRITE_TIMEOUT_SCAN_TICK_INTERVAL = Integer.getInteger("fastjava.selectors.write.tick", 4);
-        private static final int SELECT_TIMEOUT_MILLIS = Integer.getInteger("fastjava.selectors.select.timeout.ms", 100);
-        private static final int ACCEPTOR_PENDING_CHECK_INTERVAL
+    private static final int SELECT_TIMEOUT_MILLIS = Integer.getInteger("fastjava.selectors.select.timeout.ms", 100);
+    private static final int ACCEPTOR_PENDING_CHECK_INTERVAL
             = Integer.getInteger("fastjava.selectors.acceptor.pending.check.interval", 8);
-        private static final int LOCAL_DRAIN_BATCH = Integer.getInteger("fastjava.selectors.local.drain.batch", 256);
-        private static final int ACCEPTOR_GLOBAL_DRAIN_BATCH
+    private static final int LOCAL_DRAIN_BATCH = Integer.getInteger("fastjava.selectors.local.drain.batch", 256);
+    private static final int ACCEPTOR_GLOBAL_DRAIN_BATCH
             = Integer.getInteger("fastjava.selectors.acceptor.global.drain.batch", 512);
 
     private final int numSelectors;

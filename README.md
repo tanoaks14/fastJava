@@ -116,6 +116,37 @@ curl http://localhost:8080/
 curl https://localhost:8443/ --insecure
 ```
 
+## Demo Backend Example
+
+Compile the project and generate the runtime classpath.
+
+Windows PowerShell:
+
+```powershell
+mvn --% -q -DskipTests compile dependency:build-classpath -Dmdep.outputFile=target/demo.classpath
+```
+
+Then run the example application.
+
+Windows PowerShell:
+
+```powershell
+$cp = "target/classes;$(Get-Content target/demo.classpath -Raw)"
+java --add-modules jdk.incubator.vector -cp $cp com.fastjava.examples.DemoBackendApplication 9090 ./static
+```
+
+Core demo endpoints:
+
+- `GET /healthz` for the static fast route
+- `GET /api/info` for JSON metadata and request details
+- `GET|POST|PUT|DELETE /api/todos` for in-memory REST CRUD
+- `GET /api/session` for session-backed counters
+- `GET /api/async/time` for async servlet processing
+- `GET /api/sse/ticks` for server-sent events
+- `GET|POST /api/upload` for multipart upload inspection
+- `GET /assets/*` for static files
+- `WS /ws/demo/{room}` for annotated WebSocket chat rooms
+
 ## Configuration Reference
 
 Example `server.properties`:
