@@ -1728,16 +1728,16 @@ public class FastJavaNioServer {
             connection.consume(parsed.bytesConsumed);
             boolean closeAfterWrite = parsed.closeAfterResponse();
             boolean canBypassCompletionOrdering = requestSequence == connection.nextResponseSequence()
-                && connection.inFlightRequestCount() == 0
-                && !connection.hasBufferedCompletions();
+                    && connection.inFlightRequestCount() == 0
+                    && !connection.hasBufferedCompletions();
             if (canBypassCompletionOrdering) {
-            connection.releaseReservedRequestSequence();
-            queueResponse(
-                key,
-                connection,
-                staticResponse.response(closeAfterWrite),
-                closeAfterWrite);
-            return;
+                connection.releaseReservedRequestSequence();
+                queueResponse(
+                        key,
+                        connection,
+                        staticResponse.response(closeAfterWrite),
+                        closeAfterWrite);
+                return;
             }
             enqueueImmediateCompletion(
                     key,

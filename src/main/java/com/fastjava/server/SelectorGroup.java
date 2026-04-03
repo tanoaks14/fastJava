@@ -25,7 +25,7 @@ import org.slf4j.LoggerFactory;
 final class SelectorGroup {
 
     private static final Logger logger = LoggerFactory.getLogger(SelectorGroup.class);
-        private static final boolean DISTRIBUTE_CONNECTIONS = Boolean.parseBoolean(
+    private static final boolean DISTRIBUTE_CONNECTIONS = Boolean.parseBoolean(
             System.getProperty("fastjava.selectors.distribute", "true"));
     private static final int COMPLETION_RING_CAPACITY = Integer.getInteger("fastjava.selectors.completion.ring", 8192);
     private static final int IDLE_SCAN_TICK_INTERVAL = Integer.getInteger("fastjava.selectors.idle.tick", 16);
