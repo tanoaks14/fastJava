@@ -51,7 +51,8 @@ Param(
     [ValidateSet("default", "profile")]
     [string]$EventProfile = "profile",
     [int]$TopN = 20,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$StaticRoute
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,27 +85,26 @@ function Wait-ForTcpPort {
     return $false
 }
 
-function Start-LoadJobs {
+function Start-OptimizedLoad {
     param(
-        [int]$JobCount,
-        [int]$Seconds,
-        [string]$Url
+        [int]$Concurrency,
+        [int]$DurationSeconds,
+        [string]$Url,
+        [string]$Classpath,
+        [int]$WarmupSeconds = 5
     )
-
-    $jobs = @()
-    1..$JobCount | ForEach-Object {
-        $jobs += Start-Job -ScriptBlock {
-            param($secs, $targetUrl)
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            $ok = 0
-            while ($sw.Elapsed.TotalSeconds -lt $secs) {
-                & curl.exe -s $targetUrl > $null
-                if ($LASTEXITCODE -eq 0) { $ok++ }
-            }
-            $ok
-        } -ArgumentList $Seconds, $Url
-    }
-    return $jobs
+    
+    Write-Host "  Running $DurationSeconds second load test with $Concurrency concurrent threads"
+    Write-Host "  Warmup: $WarmupSeconds seconds"
+    
+    $output = & java -cp $Classpath `
+        com.fastjava.bench.profile.DurationBasedHttpLoadGenerator `
+        "$Url" `
+        $DurationSeconds `
+        $Concurrency `
+        $WarmupSeconds 2>&1
+    
+    return $output
 }
 
 if ($LoadSeconds -le 0) {
@@ -166,6 +166,10 @@ $serverArgs = @(
     "com.fastjava.bench.profile.FastJavaIsolatedProfileServer",
     "$Port"
 )
+if ($StaticRoute) {
+    $serverArgs += "static"
+    Write-Host "Static route mode: bypassing servlet pipeline for /hello"
+}
 
 Write-Host "Starting isolated profile server on port $Port..."
 $server = Start-Process -FilePath $javaExe -ArgumentList $serverArgs -PassThru -RedirectStandardOutput $serverLog -RedirectStandardError $serverErrLog
@@ -177,8 +181,8 @@ if (!(Wait-ForTcpPort -TargetHost "127.0.0.1" -Port $Port -TimeoutSeconds 20)) {
 
 $jobs = @()
 try {
-    Write-Host "Starting load: concurrency=$Concurrency, seconds=$LoadSeconds"
-    $jobs = Start-LoadJobs -JobCount $Concurrency -Seconds $LoadSeconds -Url $loadUrl
+    Write-Host "Starting optimized load: concurrency=$Concurrency, duration=$LoadSeconds seconds"
+    $loadOutput = Start-OptimizedLoad -Concurrency $Concurrency -DurationSeconds $LoadSeconds -Url $loadUrl -Classpath $classpath
 
     $captureScript = Join-Path $PSScriptRoot "jfr-capture.ps1"
 
@@ -190,9 +194,17 @@ try {
         -Name $Name `
         -EventProfile $EventProfile
 
-    $counts = Receive-Job -Job $jobs -Wait -AutoRemoveJob
-    $totalOk = ($counts | Measure-Object -Sum).Sum
-    if ($null -eq $totalOk) { $totalOk = 0 }
+    # Parse load results
+    $totalOk = 0
+    $throughput = 0
+    foreach ($line in $loadOutput) {
+        if ($line -match "throughput=([\d.]+)") {
+            $throughput = [double]$Matches[1]
+        }
+        if ($line -match "success=(\d+)") {
+            $totalOk = [int]$Matches[1]
+        }
+    }
 
     $jfrFile = Join-Path $OutputDir ("{0}.jfr" -f $Name)
     $heapFile = Join-Path $OutputDir ("{0}-heap.txt" -f $Name)
@@ -201,7 +213,10 @@ try {
     Write-Host "Load summary"
     Write-Host "  URL           : $loadUrl"
     Write-Host "  Total 2xx req : $totalOk"
-    Write-Host ("  Approx req/s  : {0:N0}" -f ($totalOk / [Math]::Max(1, $LoadSeconds)))
+    if ($throughput -gt 0) {
+        Write-Host ("  Actual TPS    : {0:N0}" -f $throughput)
+    }
+    Write-Host ("  Expected TPS  : {0:N0} req/s (if achieved)" -f ($totalOk / [Math]::Max(1, $LoadSeconds)))
 
     $summaryScript = Join-Path $PSScriptRoot "jfr-summary.ps1"
     if ((Test-Path $summaryScript) -and (Test-Path $jfrFile)) {
@@ -225,13 +240,6 @@ try {
     Write-Host "  Server err: $serverErrLog"
 }
 finally {
-    if ($jobs.Count -gt 0) {
-        $running = $jobs | Where-Object { $_.State -eq "Running" }
-        if ($running.Count -gt 0) {
-            Stop-Job -Job $running -ErrorAction SilentlyContinue
-            Receive-Job -Job $running -ErrorAction SilentlyContinue | Out-Null
-        }
-    }
     if ($server -and !$server.HasExited) {
         Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
     }

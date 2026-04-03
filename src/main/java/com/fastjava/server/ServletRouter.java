@@ -276,6 +276,12 @@ public class ServletRouter {
             RegisteredServlet registration,
             String requestPath,
             byte[] requestPathAscii) {
+        if (filterMappings.isEmpty()) {
+            return new DispatchTarget(
+                    registration.servlet,
+                    List.of(),
+                    registration.contextClassLoader);
+        }
         List<Filter> filters = new ArrayList<>();
         for (PathPattern<RegisteredFilter> pattern : filterMappings) {
             if (pattern.matches(requestPath, requestPathAscii)) {
@@ -285,7 +291,7 @@ public class ServletRouter {
 
         return new DispatchTarget(
                 registration.servlet,
-                Collections.unmodifiableList(filters),
+                filters.isEmpty() ? List.of() : Collections.unmodifiableList(filters),
                 registration.contextClassLoader);
     }
 

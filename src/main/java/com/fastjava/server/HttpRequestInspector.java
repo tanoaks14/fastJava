@@ -1,10 +1,10 @@
 package com.fastjava.server;
 
-import com.fastjava.http.parser.ParsedHttpRequest;
-import com.fastjava.http.simd.SIMDByteScanner;
-
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+
+import com.fastjava.http.parser.ParsedHttpRequest;
+import com.fastjava.http.simd.SIMDByteScanner;
 
 public final class HttpRequestInspector {
 
@@ -46,16 +46,18 @@ public final class HttpRequestInspector {
             return new RequestValidationResult(431, "Request Header Fields Too Large");
         }
 
-        final String contentLengthHeader;
         final String transferEncoding;
         try {
-            contentLengthHeader = extractHeaderValue(buffer, headerEnd, HEADER_CONTENT_LENGTH, "Content-Length");
             transferEncoding = extractHeaderValue(buffer, headerEnd, HEADER_TRANSFER_ENCODING, "Transfer-Encoding");
         } catch (IllegalArgumentException malformedHeaders) {
             return new RequestValidationResult(400, "Bad Request");
         }
 
-        if (contentLengthHeader != null && transferEncoding != null) {
+        // Parse Content-Length directly from bytes without String allocation
+        int contentLengthDirect = extractContentLengthDirect(buffer, headerEnd);
+        boolean hasContentLength = contentLengthDirect >= 0 || contentLengthDirect == -2;
+
+        if (hasContentLength && transferEncoding != null) {
             return new RequestValidationResult(400, "Bad Request");
         }
 
@@ -63,20 +65,16 @@ public final class HttpRequestInspector {
             return new RequestValidationResult(501, "Not Implemented");
         }
 
-        if (contentLengthHeader != null) {
-            try {
-                int contentLength = Integer.parseInt(contentLengthHeader);
-                if (contentLength < 0) {
-                    return new RequestValidationResult(400, "Bad Request");
-                }
-                if (contentLength > limits.maxBodyBytes()) {
-                    return new RequestValidationResult(413, "Payload Too Large");
-                }
-                if (headerBytes + contentLength > limits.maxRequestSize()) {
-                    return new RequestValidationResult(413, "Payload Too Large");
-                }
-            } catch (NumberFormatException ignored) {
-                return new RequestValidationResult(400, "Bad Request");
+        if (contentLengthDirect == -2) {
+            // Malformed Content-Length value
+            return new RequestValidationResult(400, "Bad Request");
+        }
+        if (contentLengthDirect >= 0) {
+            if (contentLengthDirect > limits.maxBodyBytes()) {
+                return new RequestValidationResult(413, "Payload Too Large");
+            }
+            if (headerBytes + contentLengthDirect > limits.maxRequestSize()) {
+                return new RequestValidationResult(413, "Payload Too Large");
             }
         }
 
@@ -251,6 +249,55 @@ public final class HttpRequestInspector {
             start = end + 1;
         }
         return false;
+    }
+
+    /**
+     * Parse Content-Length value directly from the byte buffer without creating
+     * a String. Returns: -1 if header not found, -2 if malformed (non-digit,
+     * duplicate, or overflow), or the parsed non-negative integer value.
+     */
+    static int extractContentLengthDirect(byte[] buffer, int headerEnd) {
+        int scanLimit = Math.min(buffer.length, headerEnd + 2);
+        int requestLineEnd = SIMDByteScanner.findCRLF(buffer, 0, scanLimit);
+        if (requestLineEnd == -1) {
+            return -1;
+        }
+        int result = -1;
+        int cursor = requestLineEnd + 2;
+        while (cursor < headerEnd) {
+            int lineEnd = SIMDByteScanner.findCRLF(buffer, cursor, scanLimit);
+            if (lineEnd == -1 || lineEnd == cursor) {
+                break;
+            }
+            if (buffer[cursor] == ' ' || buffer[cursor] == '\t') {
+                return -2; // obsolete folded header
+            }
+            int colon = SIMDByteScanner.indexOfByte(buffer, cursor, lineEnd, (byte) ':');
+            if (colon > cursor && equalsHeaderNameIgnoreCase(buffer, cursor, colon, HEADER_CONTENT_LENGTH)) {
+                if (result >= 0) {
+                    return -2; // duplicate header
+                }
+                int valueStart = SIMDByteScanner.trimStart(buffer, colon + 1, lineEnd);
+                int valueEnd = SIMDByteScanner.trimEnd(buffer, valueStart, lineEnd);
+                if (valueStart == valueEnd) {
+                    return -2; // empty value
+                }
+                int parsed = 0;
+                for (int i = valueStart; i < valueEnd; i++) {
+                    byte b = buffer[i];
+                    if (b < '0' || b > '9') {
+                        return -2;
+                    }
+                    parsed = parsed * 10 + (b - '0');
+                    if (parsed < 0) {
+                        return -2; // overflow
+
+                                    }}
+                result = parsed;
+            }
+            cursor = lineEnd + 2;
+        }
+        return result;
     }
 
     private static String extractHeaderValue(byte[] buffer, int headerEnd, byte[] headerNameBytes, String headerName) {

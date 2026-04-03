@@ -2005,7 +2005,16 @@ public class FastJavaNioServer {
     }
 
     private static String staticRouteKey(String method, String path) {
-        String normalizedMethod = method == null ? "GET" : method.trim().toUpperCase(java.util.Locale.ROOT);
+        String normalizedMethod;
+        if (method == null || "GET".equals(method)) {
+            normalizedMethod = "GET";
+        } else if ("POST".equals(method)) {
+            normalizedMethod = "POST";
+        } else if ("HEAD".equals(method)) {
+            normalizedMethod = "HEAD";
+        } else {
+            normalizedMethod = method.trim().toUpperCase(java.util.Locale.ROOT);
+        }
         return normalizedMethod + " " + normalizeStaticPath(path);
     }
 
