@@ -1,14 +1,15 @@
 package com.fastjava.server.tls;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
 import javax.net.ssl.SSLSession;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.SocketChannel;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Wraps a {@link SocketChannel} with a {@link SSLEngine} to provide transparent
@@ -29,35 +30,40 @@ import java.nio.channels.SocketChannel;
  * {@code close_notify}.</li>
  * </ol>
  *
- * <h2>Buffer state convention</h2>
- * {@code netIn} is kept in <em>read mode</em> between calls so that
- * {@code compact()}
- * at the start of {@link #read} correctly preserves any leftover bytes from a
- * previous
- * partial TLS record.
+ * <h2>Buffer state convention</h2> {@code netIn} is kept in <em>read mode</em>
+ * between calls so that {@code compact()} at the start of {@link #read}
+ * correctly preserves any leftover bytes from a previous partial TLS record.
  */
 public final class TlsChannelHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(TlsChannelHandler.class);
 
-    /** Empty buffer used as the plaintext source during handshake WRAP steps. */
+    /**
+     * Empty buffer used as the plaintext source during handshake WRAP steps.
+     */
     private static final ByteBuffer EMPTY = ByteBuffer.allocate(0);
 
     private final SocketChannel channel;
     private final SSLEngine engine;
 
-    /** Encrypted bytes received from the network (read mode between calls). */
+    /**
+     * Encrypted bytes received from the network (read mode between calls).
+     */
     private final ByteBuffer netIn;
 
-    /** Encrypted bytes to be written to the network. */
+    /**
+     * Encrypted bytes to be written to the network.
+     */
     private final ByteBuffer netOut;
 
-    /** Scratch buffer for plaintext produced during the handshake unwrap steps. */
+    /**
+     * Scratch buffer for plaintext produced during the handshake unwrap steps.
+     */
     private final ByteBuffer appIn;
 
     /**
-     * Plaintext bytes produced during handshake unwrap that must be delivered to
-     * the first application reads.
+     * Plaintext bytes produced during handshake unwrap that must be delivered
+     * to the first application reads.
      */
     private byte[] prefetchedAppData = new byte[0];
     private int prefetchedAppOffset;
@@ -77,7 +83,9 @@ public final class TlsChannelHandler {
         this.appIn = ByteBuffer.allocate(appSize);
     }
 
-    /** Returns the underlying {@link SocketChannel}. */
+    /**
+     * Returns the underlying {@link SocketChannel}.
+     */
     public SocketChannel channel() {
         return channel;
     }
@@ -87,8 +95,8 @@ public final class TlsChannelHandler {
     }
 
     /**
-     * @return true when handshake/read buffers already contain data that should be
-     *         consumed without waiting for another socket readability event.
+     * @return true when handshake/read buffers already contain data that should
+     * be consumed without waiting for another socket readability event.
      */
     public boolean hasBufferedInput() {
         return (prefetchedAppData.length - prefetchedAppOffset) > 0 || netIn.hasRemaining();
@@ -97,11 +105,10 @@ public final class TlsChannelHandler {
     // -------------------------------------------------------------------------
     // Handshake
     // -------------------------------------------------------------------------
-
     /**
      * Performs the TLS handshake synchronously. The channel <b>must</b> be in
-     * blocking mode. After this method returns the channel should be switched to
-     * non-blocking mode and registered with the NIO selector.
+     * blocking mode. After this method returns the channel should be switched
+     * to non-blocking mode and registered with the NIO selector.
      *
      * @throws IOException if the handshake fails
      */
@@ -155,7 +162,8 @@ public final class TlsChannelHandler {
                     }
                     status = engine.getHandshakeStatus();
                 }
-                default -> throw new IOException("Unexpected TLS handshake status: " + status);
+                default ->
+                    throw new IOException("Unexpected TLS handshake status: " + status);
             }
         }
     }
@@ -163,14 +171,13 @@ public final class TlsChannelHandler {
     // -------------------------------------------------------------------------
     // Data transfer (non-blocking)
     // -------------------------------------------------------------------------
-
     /**
      * Reads plaintext bytes into {@code appDst}. The channel must be in
      * non-blocking mode.
      *
      * @param appDst destination buffer (plaintext)
      * @return plaintext bytes written to {@code appDst}, {@code 0} if no data
-     *         is available yet, or {@code -1} on EOF / TLS close
+     * is available yet, or {@code -1} on EOF / TLS close
      * @throws IOException on I/O or TLS error
      */
     public int read(ByteBuffer appDst) throws IOException {
@@ -248,7 +255,7 @@ public final class TlsChannelHandler {
      * Encrypts {@code appSrc} and writes the ciphertext to the channel.
      *
      * @param appSrc plaintext source; its {@code position} is advanced by the
-     *               number of consumed bytes
+     * number of consumed bytes
      * @return number of plaintext bytes consumed from {@code appSrc}
      * @throws IOException on I/O or TLS error
      */
@@ -265,10 +272,9 @@ public final class TlsChannelHandler {
     // -------------------------------------------------------------------------
     // Shutdown
     // -------------------------------------------------------------------------
-
     /**
-     * Sends a TLS {@code close_notify} alert (best-effort).
-     * The caller is responsible for closing the underlying {@link SocketChannel}.
+     * Sends a TLS {@code close_notify} alert (best-effort). The caller is
+     * responsible for closing the underlying {@link SocketChannel}.
      */
     public void close() throws IOException {
         engine.closeOutbound();

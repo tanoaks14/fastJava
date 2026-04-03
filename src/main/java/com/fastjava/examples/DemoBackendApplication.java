@@ -54,8 +54,8 @@ public final class DemoBackendApplication {
         DemoRuntimeConfig config = DemoRuntimeConfig.parse(args);
 
         FastJavaNioServer server = config.tlsConfig() == null
-            ? new FastJavaNioServer(config.port(), RequestLimits.defaults(256 * 1024))
-            : new FastJavaNioServer(config.port(), RequestLimits.defaults(256 * 1024), config.tlsConfig());
+                ? new FastJavaNioServer(config.port(), RequestLimits.defaults(256 * 1024))
+                : new FastJavaNioServer(config.port(), RequestLimits.defaults(256 * 1024), config.tlsConfig());
         server.addFilter(new CorsFilter(Set.of("*")));
         server.addFilter(new GzipFilter());
 
@@ -526,7 +526,7 @@ public final class DemoBackendApplication {
                                         </body>
                                         </html>
                                         """
-                                        .replace("%TRANSPORT%", config.tlsEnabled() ? "TLS / WSS" : "plain HTTP / WS")
+                    .replace("%TRANSPORT%", config.tlsEnabled() ? "TLS / WSS" : "plain HTTP / WS")
                     .replace("%ROOM%", escapeHtml(room))
                     .replace("%WS_URL%", escapeHtml(websocketUrl))
                     .replace("%WS_URL_JSON%", jsonString(websocketUrl));
@@ -707,9 +707,12 @@ public final class DemoBackendApplication {
                             throw new IllegalArgumentException("Unknown argument: " + arg);
                         }
                         switch (positionalIndex) {
-                            case 0 -> port = Integer.parseInt(arg);
-                            case 1 -> staticRoot = Path.of(arg);
-                            default -> throw new IllegalArgumentException("Unexpected positional argument: " + arg);
+                            case 0 ->
+                                port = Integer.parseInt(arg);
+                            case 1 ->
+                                staticRoot = Path.of(arg);
+                            default ->
+                                throw new IllegalArgumentException("Unexpected positional argument: " + arg);
                         }
                         positionalIndex++;
                     }
