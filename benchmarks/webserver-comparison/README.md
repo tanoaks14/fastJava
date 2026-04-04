@@ -4,6 +4,8 @@ This folder contains a reproducible benchmark harness to compare FastJava agains
 - Undertow
 - Tomcat (embedded)
 - Netty
+- Helidon Nima
+- Avaje Nima
 
 ## Scenario
 

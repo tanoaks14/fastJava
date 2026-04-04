@@ -263,6 +263,7 @@ final class SelectorGroup {
                 boolean hadLocalWork = drainedLocalCompletions > 0 || drainedLocalTasks > 0;
 
                 if (isAcceptor) {
+                    server.maybeHotReloadTlsCertificates();
                     server.drainPendingTlsRegistrations();
                     int globalTaskBudget = ACCEPTOR_GLOBAL_DRAIN_BATCH <= 0
                             ? 0

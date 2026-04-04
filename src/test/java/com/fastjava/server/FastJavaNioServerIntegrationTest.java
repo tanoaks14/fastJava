@@ -52,6 +52,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public class FastJavaNioServerIntegrationTest {
 
@@ -116,10 +117,10 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void servesSimpleGetRequest() throws Exception {
         RawHttpResponse response = sendRequest(
-                "GET / HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET / HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertEquals("text/html", response.header("Content-Type"));
@@ -130,9 +131,9 @@ public class FastJavaNioServerIntegrationTest {
     public void streamsSseResponseThroughNioLifecycle() throws Exception {
         RawHttpResponse response = sendRequest(
                 "GET /sse HTTP/1.1\r\n"
-                        + "Host: localhost\r\n"
-                        + "Connection: close\r\n"
-                        + "\r\n");
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertTrue(response.header("Content-Type").startsWith("text/event-stream"));
@@ -144,10 +145,10 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void exposesPrometheusMetricsEndpoint() throws Exception {
         RawHttpResponse response = sendRequest(
-                "GET /metrics HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET /metrics HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertTrue(response.header("Content-Type").startsWith("text/plain"));
@@ -159,11 +160,11 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void corsSimpleRequestAddsAllowOriginHeader() throws Exception {
         RawHttpResponse response = sendRequest(
-                "GET / HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Origin: https://app.example\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET / HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Origin: https://app.example\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertEquals("https://app.example", response.header("Access-Control-Allow-Origin"));
@@ -182,10 +183,10 @@ public class FastJavaNioServerIntegrationTest {
 
             Thread.sleep(25);
 
-            output.write(("mented HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: close\r\n" +
-                    "\r\n").getBytes(StandardCharsets.US_ASCII));
+            output.write(("mented HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n").getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
             RawHttpResponse response = RawHttpResponse.readFrom(socket.getInputStream());
@@ -203,26 +204,65 @@ public class FastJavaNioServerIntegrationTest {
             OutputStream output = socket.getOutputStream();
             InputStream input = socket.getInputStream();
 
-            output.write(("GET / HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: keep-alive\r\n" +
-                    "\r\n").getBytes(StandardCharsets.US_ASCII));
+            output.write(("GET / HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: keep-alive\r\n"
+                    + "\r\n").getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
             RawHttpResponse firstResponse = RawHttpResponse.readFrom(input);
             assertEquals(200, firstResponse.statusCode);
             assertEquals("keep-alive", firstResponse.header("Connection"));
 
-            output.write(("GET /search?q=nio HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: close\r\n" +
-                    "\r\n").getBytes(StandardCharsets.US_ASCII));
+            output.write(("GET /search?q=nio HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n").getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
             RawHttpResponse secondResponse = RawHttpResponse.readFrom(input);
             assertEquals(200, secondResponse.statusCode);
             assertEquals("close", secondResponse.header("Connection"));
             assertEquals("q=nio", secondResponse.body.trim());
+        }
+    }
+
+    @Test
+    public void closesIdleKeepAliveConnectionsAfterConfiguredTimeout() throws Exception {
+        FastJavaNioServer timeoutServer = new FastJavaNioServer(0,
+                new RequestLimits(16384, 250, 128, 512, 512, 1_000),
+                4,
+                1024);
+        timeoutServer.addServlet("/", new HelloWorldServlet());
+        timeoutServer.start();
+        int timeoutServerPort = timeoutServer.getBoundPort();
+        waitForServerReady(timeoutServerPort);
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", timeoutServerPort), 1_000);
+            socket.setSoTimeout(1_500);
+
+            OutputStream output = socket.getOutputStream();
+            InputStream input = socket.getInputStream();
+
+            output.write(("GET / HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: keep-alive\r\n"
+                    + "\r\n").getBytes(StandardCharsets.US_ASCII));
+            output.flush();
+
+            RawHttpResponse firstResponse = RawHttpResponse.readFrom(input);
+            assertEquals(200, firstResponse.statusCode);
+            assertEquals("keep-alive", firstResponse.header("Connection"));
+
+            Thread.sleep(700);
+
+            int closed = input.read();
+            assertEquals(-1, closed);
+        } catch (java.net.SocketTimeoutException timeout) {
+            fail("Expected idle keep-alive connection to close before read timeout");
+        } finally {
+            timeoutServer.stop();
         }
     }
 
@@ -310,12 +350,12 @@ public class FastJavaNioServerIntegrationTest {
     public void rejectsInvalidWebSocketUpgradeRequest() throws Exception {
         RawHttpResponse response = sendRequest(
                 "GET / HTTP/1.1\r\n"
-                        + "Host: localhost\r\n"
-                        + "Upgrade: websocket\r\n"
-                        + "Connection: Upgrade\r\n"
-                        + "Sec-WebSocket-Version: 12\r\n"
-                        + "Sec-WebSocket-Key: invalid\r\n"
-                        + "\r\n");
+                + "Host: localhost\r\n"
+                + "Upgrade: websocket\r\n"
+                + "Connection: Upgrade\r\n"
+                + "Sec-WebSocket-Version: 12\r\n"
+                + "Sec-WebSocket-Key: invalid\r\n"
+                + "\r\n");
 
         assertEquals(400, response.statusCode);
     }
@@ -459,9 +499,9 @@ public class FastJavaNioServerIntegrationTest {
 
             RawHttpResponse first = sendRequest(
                     "GET /apps/chat/status HTTP/1.1\r\n"
-                            + "Host: localhost\r\n"
-                            + "Connection: close\r\n"
-                            + "\r\n");
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n");
             assertEquals(200, first.statusCode);
             assertEquals("v1:true", first.body.trim());
 
@@ -471,18 +511,18 @@ public class FastJavaNioServerIntegrationTest {
 
             RawHttpResponse second = sendRequest(
                     "GET /apps/chat/status HTTP/1.1\r\n"
-                            + "Host: localhost\r\n"
-                            + "Connection: close\r\n"
-                            + "\r\n");
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n");
             assertEquals(200, second.statusCode);
             assertEquals("v2:true", second.body.trim());
 
             assertTrue(server.undeployWebApp("app-nio"));
             RawHttpResponse afterUndeploy = sendRequest(
                     "GET /apps/chat/status HTTP/1.1\r\n"
-                            + "Host: localhost\r\n"
-                            + "Connection: close\r\n"
-                            + "\r\n");
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n");
             assertEquals(404, afterUndeploy.statusCode);
         } finally {
             classLoaderV1.close();
@@ -497,19 +537,19 @@ public class FastJavaNioServerIntegrationTest {
             slowSocket.setSoTimeout(2_000);
 
             OutputStream slowOutput = slowSocket.getOutputStream();
-            slowOutput.write(("GET /slow HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: close\r\n" +
-                    "\r\n").getBytes(StandardCharsets.US_ASCII));
+            slowOutput.write(("GET /slow HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n").getBytes(StandardCharsets.US_ASCII));
             slowOutput.flush();
 
             assertTrue(slowServletStarted.await(1, TimeUnit.SECONDS));
 
             RawHttpResponse fastResponse = sendRequest(
-                    "GET /search?q=parallel HTTP/1.1\r\n" +
-                            "Host: localhost\r\n" +
-                            "Connection: close\r\n" +
-                            "\r\n");
+                    "GET /search?q=parallel HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n");
             assertEquals(200, fastResponse.statusCode);
             assertEquals("q=parallel", fastResponse.body.trim());
 
@@ -523,10 +563,10 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void supportsLargeResponsesAcrossMultipleWriteCycles() throws Exception {
         RawHttpResponse response = sendRequest(
-                "GET /large HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET /large HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertEquals(String.valueOf(LARGE_BODY.length()), response.header("Content-Length"));
@@ -553,10 +593,10 @@ public class FastJavaNioServerIntegrationTest {
                 socket.connect(new InetSocketAddress("127.0.0.1", timeoutServerPort), 1_000);
 
                 OutputStream output = socket.getOutputStream();
-                output.write(("GET /very-large HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: keep-alive\r\n" +
-                        "\r\n").getBytes(StandardCharsets.US_ASCII));
+                output.write(("GET /very-large HTTP/1.1\r\n"
+                        + "Host: localhost\r\n"
+                        + "Connection: keep-alive\r\n"
+                        + "\r\n").getBytes(StandardCharsets.US_ASCII));
                 output.flush();
 
                 Thread.sleep(900);
@@ -579,10 +619,10 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void servesStaticFilesOverNioPath() throws Exception {
         RawHttpResponse response = sendRequest(
-                "GET /static/asset.txt HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET /static/asset.txt HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertEquals("text/plain", response.header("Content-Type"));
@@ -600,10 +640,10 @@ public class FastJavaNioServerIntegrationTest {
             OutputStream output = socket.getOutputStream();
             InputStream input = socket.getInputStream();
 
-            output.write(("GET /chunked HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: keep-alive\r\n" +
-                    "\r\n").getBytes(StandardCharsets.US_ASCII));
+            output.write(("GET /chunked HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: keep-alive\r\n"
+                    + "\r\n").getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
             RawHttpResponse firstResponse = RawHttpResponse.readFrom(input);
@@ -612,10 +652,10 @@ public class FastJavaNioServerIntegrationTest {
             assertNull(firstResponse.header("Content-Length"));
             assertEquals("nio-chunked-body", firstResponse.body.trim());
 
-            output.write(("GET /search?q=nio-after-chunked HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: close\r\n" +
-                    "\r\n").getBytes(StandardCharsets.US_ASCII));
+            output.write(("GET /search?q=nio-after-chunked HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n").getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
             RawHttpResponse secondResponse = RawHttpResponse.readFrom(input);
@@ -634,18 +674,18 @@ public class FastJavaNioServerIntegrationTest {
             OutputStream output = socket.getOutputStream();
             InputStream input = socket.getInputStream();
 
-            String pipelinedRequest = "GET /pipeline?id=1&delay=120 HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: keep-alive\r\n" +
-                    "\r\n" +
-                    "GET /pipeline?id=2&delay=0 HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: keep-alive\r\n" +
-                    "\r\n" +
-                    "GET /pipeline?id=3&delay=0 HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: close\r\n" +
-                    "\r\n";
+            String pipelinedRequest = "GET /pipeline?id=1&delay=120 HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: keep-alive\r\n"
+                    + "\r\n"
+                    + "GET /pipeline?id=2&delay=0 HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: keep-alive\r\n"
+                    + "\r\n"
+                    + "GET /pipeline?id=3&delay=0 HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n";
             output.write(pipelinedRequest.getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
@@ -672,14 +712,14 @@ public class FastJavaNioServerIntegrationTest {
             OutputStream output = socket.getOutputStream();
             InputStream input = socket.getInputStream();
 
-            String pipelinedRequest = "GET /pipeline-observe?id=1 HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: keep-alive\r\n" +
-                    "\r\n" +
-                    "GET /pipeline-observe?id=2 HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: close\r\n" +
-                    "\r\n";
+            String pipelinedRequest = "GET /pipeline-observe?id=1 HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: keep-alive\r\n"
+                    + "\r\n"
+                    + "GET /pipeline-observe?id=2 HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n";
             output.write(pipelinedRequest.getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
@@ -703,14 +743,14 @@ public class FastJavaNioServerIntegrationTest {
             OutputStream output = socket.getOutputStream();
             InputStream input = socket.getInputStream();
 
-            String pipelinedRequest = "GET /async?id=1&delay=120 HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: keep-alive\r\n" +
-                    "\r\n" +
-                    "GET /async?id=2&delay=0 HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Connection: close\r\n" +
-                    "\r\n";
+            String pipelinedRequest = "GET /async?id=1&delay=120 HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: keep-alive\r\n"
+                    + "\r\n"
+                    + "GET /async?id=2&delay=0 HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n";
 
             output.write(pipelinedRequest.getBytes(StandardCharsets.US_ASCII));
             output.flush();
@@ -729,10 +769,10 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void timesOutAsyncRequestsWhenNotCompleted() throws Exception {
         RawHttpResponse response = sendRequest(
-                "GET /async-timeout HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET /async-timeout HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(503, response.statusCode);
         assertEquals("Async request timeout", response.body.trim());
@@ -741,10 +781,10 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void dispatchesAsyncRequestToAnotherServletPath() throws Exception {
         RawHttpResponse response = sendRequest(
-                "GET /async-dispatch HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET /async-dispatch HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertEquals("q=redispatched", response.body.trim());
@@ -753,10 +793,10 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void invokesAsyncListenerCallbacksForLifecycleEvents() throws Exception {
         RawHttpResponse response = sendRequest(
-                "GET /async-listener HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET /async-listener HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertEquals("listener-ok", response.body.trim());
@@ -767,17 +807,17 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void decodesChunkedRequestBodies() throws Exception {
         RawHttpResponse response = sendRequest(
-                "POST /echo-body HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Transfer-Encoding: chunked\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n" +
-                        "5\r\n" +
-                        "hello\r\n" +
-                        "6\r\n" +
-                        " world\r\n" +
-                        "0\r\n" +
-                        "\r\n");
+                "POST /echo-body HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Transfer-Encoding: chunked\r\n"
+                + "Connection: close\r\n"
+                + "\r\n"
+                + "5\r\n"
+                + "hello\r\n"
+                + "6\r\n"
+                + " world\r\n"
+                + "0\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertEquals("len=11 body=hello world", response.body.trim());
@@ -792,12 +832,12 @@ public class FastJavaNioServerIntegrationTest {
             OutputStream output = socket.getOutputStream();
             InputStream input = socket.getInputStream();
 
-            output.write(("POST /echo-body HTTP/1.1\r\n" +
-                    "Host: localhost\r\n" +
-                    "Expect: 100-continue\r\n" +
-                    "Content-Length: 11\r\n" +
-                    "Connection: close\r\n" +
-                    "\r\n").getBytes(StandardCharsets.US_ASCII));
+            output.write(("POST /echo-body HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + "Expect: 100-continue\r\n"
+                    + "Content-Length: 11\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n").getBytes(StandardCharsets.US_ASCII));
             output.flush();
 
             String provisionalHeaders = RawHttpResponse.readHeaders(input);
@@ -815,13 +855,13 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void rejectsUnsupportedExpectations() throws Exception {
         RawHttpResponse response = sendRequest(
-                "POST /echo-body HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Expect: unsupported-token\r\n" +
-                        "Content-Length: 5\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n" +
-                        "hello");
+                "POST /echo-body HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Expect: unsupported-token\r\n"
+                + "Content-Length: 5\r\n"
+                + "Connection: close\r\n"
+                + "\r\n"
+                + "hello");
 
         assertEquals(417, response.statusCode);
     }
@@ -829,10 +869,10 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void initializesServletsAndRunsFilters() throws Exception {
         RawHttpResponse response = sendRequest(
-                "GET /lifecycle HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET /lifecycle HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, response.statusCode);
         assertEquals("applied", response.header("X-Filter"));
@@ -844,10 +884,10 @@ public class FastJavaNioServerIntegrationTest {
     @Test
     public void maintainsSessionAcrossNioRequestsUsingCookie() throws Exception {
         RawHttpResponse first = sendRequest(
-                "GET /session-counter HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET /session-counter HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, first.statusCode);
         assertEquals("counter=1", first.body.trim());
@@ -856,11 +896,11 @@ public class FastJavaNioServerIntegrationTest {
 
         String sessionCookie = setCookie.split(";", 2)[0];
         RawHttpResponse second = sendRequest(
-                "GET /session-counter HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
-                        "Cookie: " + sessionCookie + "\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n");
+                "GET /session-counter HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + "Cookie: " + sessionCookie + "\r\n"
+                + "Connection: close\r\n"
+                + "\r\n");
 
         assertEquals(200, second.statusCode);
         assertEquals("counter=2", second.body.trim());
@@ -906,6 +946,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class QueryEchoServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             response.setContentType("text/plain");
@@ -914,6 +955,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private final class SlowServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             slowServletStarted.countDown();
@@ -931,6 +973,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class LargeBodyServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             response.setContentType("text/plain");
@@ -939,6 +982,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class VeryLargeBodyServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             response.setContentType("text/plain");
@@ -947,6 +991,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class ChunkedServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             response.setContentType("text/plain");
@@ -956,6 +1001,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class EchoBodyServlet extends HttpServlet {
+
         @Override
         protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             try {
@@ -969,6 +1015,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class SessionCounterServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             HttpSession session = request.getSession(true);
@@ -981,6 +1028,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class PipelineServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             String id = request.getParameter("id");
@@ -1004,6 +1052,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class AsyncPipelineServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             AsyncContext asyncContext = request.startAsync();
@@ -1038,6 +1087,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class AsyncTimeoutServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             AsyncContext asyncContext = request.startAsync();
@@ -1046,6 +1096,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class AsyncDispatchServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             AsyncContext asyncContext = request.startAsync();
@@ -1054,6 +1105,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class AsyncListenerServlet extends HttpServlet {
+
         private static final AtomicBoolean startNotified = new AtomicBoolean();
         private static final AtomicBoolean completeNotified = new AtomicBoolean();
 
@@ -1082,6 +1134,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private final class PipelineObserveServlet extends HttpServlet {
+
         private final CountDownLatch secondArrived = new CountDownLatch(1);
         private final AtomicInteger secondObserved = new AtomicInteger();
 
@@ -1109,6 +1162,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class LifecycleServlet extends HttpServlet {
+
         private volatile boolean initCalled;
         private volatile boolean destroyCalled;
 
@@ -1127,12 +1181,13 @@ public class FastJavaNioServerIntegrationTest {
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             response.setContentType("text/plain");
             response.getWriter().print(
-                    "init=" + (initCalled && getServletConfig() != null) +
-                            " filter=" + Boolean.TRUE.equals(request.getAttribute("filter.applied")));
+                    "init=" + (initCalled && getServletConfig() != null)
+                    + " filter=" + Boolean.TRUE.equals(request.getAttribute("filter.applied")));
         }
     }
 
     private static final class HeaderFilter implements Filter {
+
         private volatile boolean initCalled;
         private volatile boolean destroyCalled;
 
@@ -1156,6 +1211,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class SseServlet extends HttpServlet {
+
         @Override
         protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException {
             SseSupport.prepareResponse(response);
@@ -1172,7 +1228,7 @@ public class FastJavaNioServerIntegrationTest {
         }
     }
 
-    @WebSocketEndpoint(path = "/ws/annotated", subprotocols = { "chat.v1", "chat.v2" })
+    @WebSocketEndpoint(path = "/ws/annotated", subprotocols = {"chat.v1", "chat.v2"})
     public static final class AnnotatedEchoEndpoint {
 
         @OnOpen
@@ -1207,6 +1263,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     public static final class ContextClassLoaderServlet extends HttpServlet {
+
         private final String version;
         private final ClassLoader expectedClassLoader;
 
@@ -1226,6 +1283,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class RawHttpResponse {
+
         private final int statusCode;
         private final String headers;
         private final String body;
@@ -1307,7 +1365,7 @@ public class FastJavaNioServerIntegrationTest {
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             int current;
             int matched = 0;
-            byte[] terminator = new byte[] { '\r', '\n', '\r', '\n' };
+            byte[] terminator = new byte[]{'\r', '\n', '\r', '\n'};
 
             while ((current = input.read()) != -1) {
                 output.write(current);
@@ -1378,6 +1436,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class WebSocketTestFrame {
+
         private final int opcode;
         private final boolean fin;
         private final boolean compressed;
@@ -1392,6 +1451,7 @@ public class FastJavaNioServerIntegrationTest {
     }
 
     private static final class WebSocketTestFrameCodec {
+
         private static final SecureRandom RANDOM = new SecureRandom();
 
         private static byte[] maskedClientText(String text) {
@@ -1404,9 +1464,9 @@ public class FastJavaNioServerIntegrationTest {
         }
 
         private static byte[] maskedClientClose(int closeCode) {
-            byte[] payload = new byte[] {
-                    (byte) ((closeCode >>> 8) & 0xFF),
-                    (byte) (closeCode & 0xFF)
+            byte[] payload = new byte[]{
+                (byte) ((closeCode >>> 8) & 0xFF),
+                (byte) (closeCode & 0xFF)
             };
             return maskedClientFrame(0x8, true, payload);
         }

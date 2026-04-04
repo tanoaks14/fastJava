@@ -1,6 +1,5 @@
 package com.fastjava.bench.comparison.jfr;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
@@ -9,8 +8,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
- * JFR-aware multi-scenario profiler.
- * Orchestrates JFR recording synchronized with load generation.
+ * JFR-aware multi-scenario profiler. Orchestrates JFR recording synchronized
+ * with load generation.
  */
 public final class JfrMultiScenarioProfiler {
 
@@ -36,7 +35,7 @@ public final class JfrMultiScenarioProfiler {
     public static void main(String[] args) throws Exception {
         if (args.length < 2) {
             System.err.println("Usage: java JfrMultiScenarioProfiler <server> <scenario> [options]");
-            System.err.println("  server: FastJava, Undertow, Tomcat, Netty");
+            System.err.println("  server: FastJava, Undertow, Tomcat, Netty, HelidonNima, AvajeNima");
             System.err.println("  scenario: simple, dynamic, static");
             System.err.println("  options:");
             System.err.println("    --warmup-requests=N (default: 10000)");
@@ -146,7 +145,6 @@ public final class JfrMultiScenarioProfiler {
 
         } catch (Exception e) {
             System.err.println("Error: " + e.getMessage());
-            e.printStackTrace();
             System.exit(1);
         }
     }
@@ -181,8 +179,8 @@ public final class JfrMultiScenarioProfiler {
         }
 
         // Send benchmark requests DURING JFR recording
-        System.out.println("Sending benchmark requests while JFR records (" + benchmarkRequests +
-                " requests, " + concurrency + " threads)...");
+        System.out.println("Sending benchmark requests while JFR records (" + benchmarkRequests
+                + " requests, " + concurrency + " threads)...");
         long startBench = System.currentTimeMillis();
         loadTestUrl(url, benchmarkRequests, concurrency, 30);
         long benchDuration = System.currentTimeMillis() - startBench;
@@ -248,8 +246,8 @@ public final class JfrMultiScenarioProfiler {
 
         int completed = Math.max(0, requests - remaining.get());
         double throughput = completed * 1000.0 / elapsed;
-        System.out.println("  Completed: " + completed + " requests in " + (elapsed / 1000.0) + "s (" +
-                String.format("%.0f", throughput) + " req/s)");
+        System.out.println("  Completed: " + completed + " requests in " + (elapsed / 1000.0) + "s ("
+                + String.format("%.0f", throughput) + " req/s)");
     }
 
     private static Scenario findScenario(String name) {
@@ -262,10 +260,12 @@ public final class JfrMultiScenarioProfiler {
     }
 
     private static String getScenarioFromUrl(String url) {
-        if (url.contains("/hello"))
+        if (url.contains("/hello")) {
             return "simple";
-        if (url.contains("/api/"))
+        }
+        if (url.contains("/api/")) {
             return "dynamic";
+        }
         return "static";
     }
 

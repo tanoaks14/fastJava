@@ -4,7 +4,7 @@
     Captures CPU, allocations, and lock contention across 3 test scenarios.
 
 .PARAMETER ServerName
-    Server to profile: "FastJava", "Undertow", "Tomcat", "Netty". Default: "FastJava"
+    Server to profile: "FastJava", "Undertow", "Tomcat", "Netty", "HelidonNima", "AvajeNima". Default: "FastJava"
 
 .PARAMETER Scenario
     Test scenario: "simple" (GET /hello), "dynamic" (GET /api/hello), "static" (static files).
@@ -35,7 +35,7 @@
 #>
 
 Param(
-    [ValidateSet("FastJava", "Undertow", "Tomcat", "Netty")]
+    [ValidateSet("FastJava", "Undertow", "Tomcat", "Netty", "HelidonNima", "AvajeNima")]
     [string]$ServerName = "FastJava",
     
     [ValidateSet("simple", "dynamic", "static")]
@@ -117,9 +117,9 @@ $serverProcArgs = @(
 )
 
 $urls = @{
-    simple = "http://127.0.0.1:9876/hello"
+    simple  = "http://127.0.0.1:9876/hello"
     dynamic = "http://127.0.0.1:9876/api/hello"
-    static = "http://127.0.0.1:9876/static/asset.txt"
+    static  = "http://127.0.0.1:9876/static/asset.txt"
 }
 $url = $urls[$Scenario]
 
@@ -206,7 +206,8 @@ try {
     Write-Host "Next: Open $jfrFile in JDK Mission Control (jmc)"
     Write-Host ""
     
-} finally {
+}
+finally {
     # Clean up: kill server if still running
     if ($serverProcess -and !$serverProcess.HasExited) {
         Write-Host "Stopping server process..."

@@ -1,6 +1,7 @@
 package com.fastjava.server;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
@@ -22,8 +23,11 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Objects;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -35,6 +39,8 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
@@ -116,6 +122,7 @@ public class FastJavaNioServer {
     private final Map<String, StaticRouteResponse> staticResponses;
     private final int maxWriteBytesPerOperation;
     private final java.util.concurrent.atomic.AtomicLong writeTimeoutCloseCount;
+    private final ConcurrentHashMap<Selector, SelectorTimeoutIndex> selectorTimeoutIndexes = new ConcurrentHashMap<>();
     private final AtomicBoolean wakeupPending = new AtomicBoolean(false);
     private volatile boolean running;
     private final TlsConfig tlsConfig;
@@ -124,6 +131,8 @@ public class FastJavaNioServer {
     private final ConcurrentLinkedQueue<TlsChannelHandler> pendingTlsRegistrations;
     private long tlsKeystoreLastModifiedMillis = -1L;
     private long tlsTruststoreLastModifiedMillis = -1L;
+    private String tlsKeystoreFingerprint = "-1";
+    private String tlsTruststoreFingerprint = "-1";
     private long lastTlsReloadCheckMillis = 0L;
     private long lastIdleCheckMillis = 0L;
     private long lastWriteTimeoutCheckMillis = 0L;
@@ -320,6 +329,8 @@ public class FastJavaNioServer {
                 sslContext = SslContextFactory.create(tlsConfig);
                 tlsKeystoreLastModifiedMillis = fileLastModifiedMillis(tlsConfig.keystoreFile());
                 tlsTruststoreLastModifiedMillis = fileLastModifiedMillis(tlsConfig.truststoreFile());
+                tlsKeystoreFingerprint = fileFingerprint(tlsConfig.keystoreFile());
+                tlsTruststoreFingerprint = fileFingerprint(tlsConfig.truststoreFile());
             } catch (Exception exception) {
                 throw new IOException("Failed to initialise TLS context", exception);
             }
@@ -485,6 +496,7 @@ public class FastJavaNioServer {
                     targetSelector,
                     SelectionKey.OP_READ,
                     new NioConnection(ch, requestLimits, handler, protocolMode));
+            trackRegisteredConnection(key);
             ServerObservability.connectionOpened();
             registerConnectionForWriting(key);
             if (handler.hasBufferedInput()) {
@@ -573,6 +585,7 @@ public class FastJavaNioServer {
                         targetSelector,
                         SelectionKey.OP_READ,
                         new NioConnection(channel, requestLimits, null, NioConnection.ProtocolMode.HTTP1));
+                trackRegisteredConnection(key);
                 ServerObservability.connectionOpened();
                 registerConnectionForWriting(key);
             }
@@ -653,6 +666,8 @@ public class FastJavaNioServer {
             sslContext = reloaded;
             tlsKeystoreLastModifiedMillis = fileLastModifiedMillis(tlsConfig.keystoreFile());
             tlsTruststoreLastModifiedMillis = fileLastModifiedMillis(tlsConfig.truststoreFile());
+            tlsKeystoreFingerprint = fileFingerprint(tlsConfig.keystoreFile());
+            tlsTruststoreFingerprint = fileFingerprint(tlsConfig.truststoreFile());
             logger.info("TLS certificate material reloaded successfully");
             return true;
         } catch (Exception exception) {
@@ -661,7 +676,7 @@ public class FastJavaNioServer {
         }
     }
 
-    private void maybeHotReloadTlsCertificates() {
+    void maybeHotReloadTlsCertificates() {
         if (tlsConfig == null || !tlsConfig.certificateHotReloadEnabled()) {
             return;
         }
@@ -674,8 +689,12 @@ public class FastJavaNioServer {
 
         long keystoreLastModified = fileLastModifiedMillis(tlsConfig.keystoreFile());
         long truststoreLastModified = fileLastModifiedMillis(tlsConfig.truststoreFile());
-        boolean keystoreChanged = keystoreLastModified != tlsKeystoreLastModifiedMillis;
-        boolean truststoreChanged = truststoreLastModified != tlsTruststoreLastModifiedMillis;
+        String keystoreFingerprint = fileFingerprint(tlsConfig.keystoreFile());
+        String truststoreFingerprint = fileFingerprint(tlsConfig.truststoreFile());
+        boolean keystoreChanged = keystoreLastModified != tlsKeystoreLastModifiedMillis
+                || !Objects.equals(keystoreFingerprint, tlsKeystoreFingerprint);
+        boolean truststoreChanged = truststoreLastModified != tlsTruststoreLastModifiedMillis
+                || !Objects.equals(truststoreFingerprint, tlsTruststoreFingerprint);
 
         if (!keystoreChanged && !truststoreChanged) {
             return;
@@ -695,6 +714,29 @@ public class FastJavaNioServer {
         }
     }
 
+    private String fileFingerprint(Path path) {
+        if (path == null || !Files.exists(path)) {
+            return "-1";
+        }
+        try (InputStream in = Files.newInputStream(path)) {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+            byte[] hash = digest.digest();
+            StringBuilder hex = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                hex.append(Character.forDigit((b >>> 4) & 0xF, 16));
+                hex.append(Character.forDigit(b & 0xF, 16));
+            }
+            return hex.toString();
+        } catch (IOException | NoSuchAlgorithmException exception) {
+            return "error:" + fileLastModifiedMillis(path);
+        }
+    }
+
     void handleRead(SelectionKey key) throws IOException {
         NioConnection connection = (NioConnection) key.attachment();
         int bytesRead = connection.readFromChannel();
@@ -703,6 +745,7 @@ public class FastJavaNioServer {
             return;
         }
         connection.touch();
+        registerConnectionForIdleTimeout(connection);
         if (connection.isSseStreamingEnabled()) {
             if (connection.bufferedBytes() > 0) {
                 connection.consume(connection.bufferedBytes());
@@ -720,6 +763,7 @@ public class FastJavaNioServer {
         }
         if (bytesWritten > 0) {
             connection.touch();
+            registerConnectionForIdleTimeout(connection);
         }
         long now = System.currentTimeMillis();
         if (connection.hasPendingWrite()
@@ -740,6 +784,7 @@ public class FastJavaNioServer {
             return;
         }
         connection.markIdle();
+        registerConnectionForIdleTimeout(connection);
         key.interestOps(SelectionKey.OP_READ);
         if (connection.bufferedBytes() > 0) {
             processBufferedData(key, connection);
@@ -2250,6 +2295,7 @@ public class FastJavaNioServer {
     private void queueResponse(SelectionKey key, NioConnection connection, ByteBuffer[] responseSegments,
             boolean closeAfterWrite) {
         connection.prepareWrite(responseSegments, null, closeAfterWrite);
+        registerConnectionForWriteTimeout(connection);
         if (attemptInlineWrite(key, connection)) {
             return;
         }
@@ -2260,6 +2306,7 @@ public class FastJavaNioServer {
     private void queueResponse(SelectionKey key, NioConnection connection, HttpExecutionResult executionResult,
             boolean closeAfterWrite) {
         connection.prepareWrite(executionResult.responseBuffers(), executionResult.fileBody(), closeAfterWrite);
+        registerConnectionForWriteTimeout(connection);
         if (attemptInlineWrite(key, connection)) {
             return;
         }
@@ -2305,6 +2352,7 @@ public class FastJavaNioServer {
             return true;
         }
         connection.markIdle();
+        registerConnectionForIdleTimeout(connection);
         key.interestOps(SelectionKey.OP_READ);
         if (connection.bufferedBytes() > 0) {
             try {
@@ -2336,29 +2384,47 @@ public class FastJavaNioServer {
         if (targetSelector == null) {
             return;
         }
-        for (SelectionKey key : targetSelector.keys()) {
-            if (!(key.attachment() instanceof NioConnection connection)) {
-                continue;
-            }
-            if (connection.hasPendingWrite()) {
-                if (doWriteTimeoutCheck && connection.hasExceededWriteTimeout(now, requestLimits.writeTimeoutMillis())) {
-                    handleWriteTimeout(key, connection, now);
+        SelectorTimeoutIndex timeoutIndex = timeoutIndexFor(targetSelector);
+        if (doWriteTimeoutCheck) {
+            ConnectionTimeoutEntry writeEntry;
+            while ((writeEntry = timeoutIndex.pollDueWrite(now)) != null) {
+                NioConnection connection = writeEntry.connection();
+                if (!connection.matchesWriteDeadline(writeEntry.deadlineMillis(), writeEntry.version())) {
+                    continue;
                 }
+                SelectionKey key = connection.selectionKey();
+                if (key == null || !key.isValid() || !connection.hasPendingWrite()) {
+                    continue;
+                }
+                if (!connection.hasExceededWriteTimeout(now, requestLimits.writeTimeoutMillis())) {
+                    registerConnectionForWriteTimeout(connection);
+                    continue;
+                }
+                handleWriteTimeout(key, connection, now);
+            }
+        }
+        if (!doIdleCheck) {
+            return;
+        }
+        ConnectionTimeoutEntry idleEntry;
+        while ((idleEntry = timeoutIndex.pollDueIdle(now)) != null) {
+            NioConnection connection = idleEntry.connection();
+            if (!connection.matchesIdleDeadline(idleEntry.deadlineMillis(), idleEntry.version())) {
                 continue;
             }
-            if (!doIdleCheck) {
+            SelectionKey key = connection.selectionKey();
+            if (key == null || !key.isValid()) {
                 continue;
             }
-            if (connection.isExecuting()) {
+            if (connection.hasPendingWrite() || connection.isExecuting() || connection.isSseStreamingEnabled()) {
                 continue;
             }
-            if (connection.isSseStreamingEnabled()) {
+            if (now - connection.lastActivityTimeMillis() <= requestLimits.keepAliveTimeoutMillis()) {
+                registerConnectionForIdleTimeout(connection);
                 continue;
             }
-            if (now - connection.lastActivityTimeMillis() > requestLimits.keepAliveTimeoutMillis()) {
-                connection.markClosing();
-                closeKey(key);
-            }
+            connection.markClosing();
+            closeKey(key);
         }
     }
 
@@ -2378,6 +2444,7 @@ public class FastJavaNioServer {
     void closeKey(SelectionKey key) {
         try {
             if (key.attachment() instanceof NioConnection connection) {
+                connection.markClosing();
                 connection.closeResources();
                 ServerObservability.connectionClosed();
             }
@@ -2454,6 +2521,12 @@ public class FastJavaNioServer {
         private int highestClientStreamId;
         private String cachedRemoteAddress;
         private int cachedRemotePort;
+        private SelectionKey selectionKey;
+        private Selector ownerSelector;
+        private long idleDeadlineMillis;
+        private long idleDeadlineVersion;
+        private long writeDeadlineMillis;
+        private long writeDeadlineVersion;
         private int connectionReceiveWindow;
         private int connectionSendWindow;
         private int peerInitialStreamWindowSize;
@@ -2506,6 +2579,12 @@ public class FastJavaNioServer {
             this.highestClientStreamId = 0;
             this.cachedRemoteAddress = null;
             this.cachedRemotePort = -1;
+            this.selectionKey = null;
+            this.ownerSelector = null;
+            this.idleDeadlineMillis = 0L;
+            this.idleDeadlineVersion = 0L;
+            this.writeDeadlineMillis = 0L;
+            this.writeDeadlineVersion = 0L;
             this.connectionReceiveWindow = HTTP2_DEFAULT_INITIAL_WINDOW_SIZE;
             this.connectionSendWindow = HTTP2_DEFAULT_INITIAL_WINDOW_SIZE;
             this.peerInitialStreamWindowSize = HTTP2_DEFAULT_INITIAL_WINDOW_SIZE;
@@ -3007,6 +3086,8 @@ public class FastJavaNioServer {
             if (state != State.WRITING) {
                 transitionTo(State.WRITING);
                 writeStartedAtMillis = System.currentTimeMillis();
+                scheduleWriteDeadline(writeStartedAtMillis);
+                clearIdleDeadline();
             }
         }
 
@@ -3157,6 +3238,8 @@ public class FastJavaNioServer {
             if (state != State.IDLE) {
                 transitionTo(State.IDLE);
                 writeStartedAtMillis = 0;
+                clearWriteDeadline();
+                scheduleIdleDeadline(System.currentTimeMillis());
             }
         }
 
@@ -3164,6 +3247,8 @@ public class FastJavaNioServer {
             if (state != State.CLOSING) {
                 transitionTo(State.CLOSING);
                 writeStartedAtMillis = 0;
+                clearIdleDeadline();
+                clearWriteDeadline();
             }
         }
 
@@ -3293,10 +3378,77 @@ public class FastJavaNioServer {
 
         private void touch() {
             lastActivityTimeMillis = System.currentTimeMillis();
+            if (!hasPendingWrite()) {
+                scheduleIdleDeadline(lastActivityTimeMillis);
+            }
         }
 
         private long lastActivityTimeMillis() {
             return lastActivityTimeMillis;
+        }
+
+        private void attachSelectionKey(SelectionKey selectionKey) {
+            this.selectionKey = selectionKey;
+            this.ownerSelector = selectionKey == null ? null : selectionKey.selector();
+            scheduleIdleDeadline(System.currentTimeMillis());
+        }
+
+        private SelectionKey selectionKey() {
+            return selectionKey;
+        }
+
+        private Selector ownerSelector() {
+            return ownerSelector;
+        }
+
+        private void scheduleIdleDeadline(long nowMillis) {
+            idleDeadlineVersion++;
+            int keepAliveTimeoutMillis = requestLimits.keepAliveTimeoutMillis();
+            idleDeadlineMillis = keepAliveTimeoutMillis <= 0 ? nowMillis : nowMillis + keepAliveTimeoutMillis;
+        }
+
+        private void clearIdleDeadline() {
+            idleDeadlineVersion++;
+            idleDeadlineMillis = 0L;
+        }
+
+        private void scheduleWriteDeadline(long nowMillis) {
+            writeDeadlineVersion++;
+            int timeoutMillis = requestLimits.writeTimeoutMillis();
+            writeDeadlineMillis = timeoutMillis <= 0 ? 0L : nowMillis + timeoutMillis;
+        }
+
+        private void clearWriteDeadline() {
+            writeDeadlineVersion++;
+            writeDeadlineMillis = 0L;
+        }
+
+        private long idleDeadlineMillis() {
+            return idleDeadlineMillis;
+        }
+
+        private long idleDeadlineVersion() {
+            return idleDeadlineVersion;
+        }
+
+        private long writeDeadlineMillis() {
+            return writeDeadlineMillis;
+        }
+
+        private long writeDeadlineVersion() {
+            return writeDeadlineVersion;
+        }
+
+        private boolean matchesIdleDeadline(long deadlineMillis, long version) {
+            return idleDeadlineMillis == deadlineMillis
+                    && idleDeadlineVersion == version
+                    && state != State.CLOSING;
+        }
+
+        private boolean matchesWriteDeadline(long deadlineMillis, long version) {
+            return writeDeadlineMillis == deadlineMillis
+                    && writeDeadlineVersion == version
+                    && state != State.CLOSING;
         }
 
         private byte[] buffer() {
@@ -3613,6 +3765,106 @@ public class FastJavaNioServer {
         }
         if (selector != null && targetSelector != selector) {
             targetSelector.wakeup();
+        }
+    }
+
+    private void trackRegisteredConnection(SelectionKey key) {
+        if (key == null || !key.isValid() || !(key.attachment() instanceof NioConnection connection)) {
+            return;
+        }
+        connection.attachSelectionKey(key);
+        registerConnectionForIdleTimeout(connection);
+    }
+
+    private void registerConnectionForIdleTimeout(NioConnection connection) {
+        if (connection == null) {
+            return;
+        }
+        Selector ownerSelector = connection.ownerSelector();
+        if (ownerSelector == null) {
+            return;
+        }
+        long deadlineMillis = connection.idleDeadlineMillis();
+        if (deadlineMillis == 0L) {
+            return;
+        }
+        timeoutIndexFor(ownerSelector).offerIdle(connection, deadlineMillis, connection.idleDeadlineVersion());
+    }
+
+    private void registerConnectionForWriteTimeout(NioConnection connection) {
+        if (connection == null) {
+            return;
+        }
+        Selector ownerSelector = connection.ownerSelector();
+        if (ownerSelector == null) {
+            return;
+        }
+        long deadlineMillis = connection.writeDeadlineMillis();
+        if (deadlineMillis == 0L) {
+            return;
+        }
+        timeoutIndexFor(ownerSelector).offerWrite(connection, deadlineMillis, connection.writeDeadlineVersion());
+    }
+
+    private SelectorTimeoutIndex timeoutIndexFor(Selector targetSelector) {
+        return selectorTimeoutIndexes.computeIfAbsent(targetSelector, ignored -> new SelectorTimeoutIndex());
+    }
+
+    private static final class SelectorTimeoutIndex {
+
+        private final PriorityQueue<ConnectionTimeoutEntry> idleQueue = new PriorityQueue<>();
+        private final PriorityQueue<ConnectionTimeoutEntry> writeQueue = new PriorityQueue<>();
+
+        private void offerIdle(NioConnection connection, long deadlineMillis, long version) {
+            idleQueue.offer(new ConnectionTimeoutEntry(connection, deadlineMillis, version));
+        }
+
+        private void offerWrite(NioConnection connection, long deadlineMillis, long version) {
+            writeQueue.offer(new ConnectionTimeoutEntry(connection, deadlineMillis, version));
+        }
+
+        private ConnectionTimeoutEntry pollDueIdle(long nowMillis) {
+            if (idleQueue.isEmpty() || idleQueue.peek().deadlineMillis() > nowMillis) {
+                return null;
+            }
+            return idleQueue.poll();
+        }
+
+        private ConnectionTimeoutEntry pollDueWrite(long nowMillis) {
+            if (writeQueue.isEmpty() || writeQueue.peek().deadlineMillis() > nowMillis) {
+                return null;
+            }
+            return writeQueue.poll();
+        }
+    }
+
+    private static final class ConnectionTimeoutEntry implements Comparable<ConnectionTimeoutEntry> {
+
+        private final NioConnection connection;
+        private final long deadlineMillis;
+        private final long version;
+
+        private ConnectionTimeoutEntry(NioConnection connection, long deadlineMillis, long version) {
+            this.connection = connection;
+            this.deadlineMillis = deadlineMillis;
+            this.version = version;
+        }
+
+        private NioConnection connection() {
+            return connection;
+        }
+
+        private long deadlineMillis() {
+            return deadlineMillis;
+        }
+
+        private long version() {
+            return version;
+        }
+
+        @Override
+        public int compareTo(ConnectionTimeoutEntry other) {
+            return Long.compare(deadlineMillis, other.deadlineMillis);
         }
     }
 }

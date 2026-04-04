@@ -1,27 +1,27 @@
 package com.fastjava.http.filter;
 
-import com.fastjava.http.impl.DefaultHttpServletResponse;
-import com.fastjava.servlet.*;
-
-import java.io.*;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.Collections;
-import java.util.Enumeration;
+
+import com.fastjava.http.impl.DefaultHttpServletResponse;
+import com.fastjava.servlet.Cookie;
+import com.fastjava.servlet.HttpServletResponse;
 
 /**
  * Wraps an {@link HttpServletResponse} to capture body bytes written during
- * filter chain
- * execution. The GzipFilter calls {@link #finish()} after the chain returns to
- * compress
- * the captured bytes and inject them into the underlying response via
+ * filter chain execution. The GzipFilter calls {@link #finish()} after the
+ * chain returns to compress the captured bytes and inject them into the
+ * underlying response via
  * {@link DefaultHttpServletResponse#setRawBody(byte[])}.
  *
  * <p>
  * All header and status mutations are delegated directly to the underlying
- * response so
- * that response metadata is visible immediately (e.g. Content-Type for MIME
- * exclusion
- * decisions). Only the body is captured in a private buffer.
+ * response so that response metadata is visible immediately (e.g. Content-Type
+ * for MIME exclusion decisions). Only the body is captured in a private buffer.
  */
 public class GzipResponseWrapper implements HttpServletResponse {
 
@@ -42,15 +42,14 @@ public class GzipResponseWrapper implements HttpServletResponse {
     }
 
     // ---- Body capture ----
-
     @Override
     public PrintWriter getWriter() {
         return captureWriter;
     }
 
     /**
-     * Returns the bytes accumulated in the capture buffer so far.
-     * Flushes the capture writer beforehand.
+     * Returns the bytes accumulated in the capture buffer so far. Flushes the
+     * capture writer beforehand.
      */
     public byte[] getCapturedBytes() {
         captureWriter.flush();
@@ -58,7 +57,6 @@ public class GzipResponseWrapper implements HttpServletResponse {
     }
 
     // ---- Status / headers — delegate directly ----
-
     @Override
     public void setStatus(int sc) {
         delegate.setStatus(sc);
@@ -134,13 +132,17 @@ public class GzipResponseWrapper implements HttpServletResponse {
         delegate.setChunkedResponseEnabled(enabled);
     }
 
-    /** Only flush the capture writer; do not commit the underlying response yet. */
+    /**
+     * Only flush the capture writer; do not commit the underlying response yet.
+     */
     @Override
     public void flushBuffer() {
         captureWriter.flush();
     }
 
-    /** Error path — skip compression and delegate body/status directly. */
+    /**
+     * Error path — skip compression and delegate body/status directly.
+     */
     @Override
     public void sendError(int sc) {
         errored = true;
@@ -157,7 +159,6 @@ public class GzipResponseWrapper implements HttpServletResponse {
 
     // ---- Output segments (executor always calls these on the delegate, not the
     // wrapper) ----
-
     @Override
     public byte[][] getOutputSegments() {
         return delegate.getOutputSegments();
@@ -169,17 +170,16 @@ public class GzipResponseWrapper implements HttpServletResponse {
     }
 
     // ---- API used by GzipFilter ----
-
     /**
      * Returns {@code true} when the servlet invoked sendError()/sendRedirect(),
-     * meaning the
-     * body was already written directly to the delegate.
+     * meaning the body was already written directly to the delegate.
      */
     public boolean isErrored() {
         return errored;
     }
 
     private static final class OutputStreamWriter extends Writer {
+
         private final OutputStream out;
         private final String charset;
 

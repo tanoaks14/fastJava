@@ -34,6 +34,8 @@ import com.fastjava.servlet.HttpServletRequest;
 import com.fastjava.servlet.HttpServletResponse;
 import com.fastjava.servlet.ServletException;
 
+import io.avaje.nima.Nima;
+import io.helidon.webserver.WebServer;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -42,6 +44,7 @@ import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -54,6 +57,7 @@ import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpVersion;
 import io.undertow.Undertow;
+import io.undertow.UndertowOptions;
 import io.undertow.util.Headers;
 
 public final class WebServerComparisonBenchmark {
@@ -64,7 +68,15 @@ public final class WebServerComparisonBenchmark {
     private static final int BENCHMARK_REQUESTS = envInt("FASTJAVA_BENCH_BENCHMARK_REQUESTS", 50_000);
     private static final int CONCURRENCY = envInt("FASTJAVA_BENCH_CONCURRENCY", 32);
     private static final int ROUNDS = envInt("FASTJAVA_BENCH_ROUNDS", 5);
-    private static final List<String> SERVER_NAMES = List.of("FastJava", "Undertow", "Tomcat", "Netty");
+    private static final boolean PEAK_TUNE = envBool("FASTJAVA_BENCH_PEAK_TUNE", false);
+    private static final int AVAILABLE_CPUS = Math.max(1, Runtime.getRuntime().availableProcessors());
+    private static final List<String> SERVER_NAMES = List.of(
+            "FastJava",
+            "Undertow",
+            "Tomcat",
+            "Netty",
+            "HelidonNima",
+            "AvajeNima");
 
     private WebServerComparisonBenchmark() {
     }
@@ -83,6 +95,7 @@ public final class WebServerComparisonBenchmark {
                 BENCHMARK_REQUESTS,
                 CONCURRENCY,
                 ROUNDS);
+        System.out.printf(Locale.ROOT, "Peak tune mode=%s%n", PEAK_TUNE ? "enabled" : "disabled");
         System.out.println("Execution model: isolated JVM per server, rotated order per round.");
 
         List<RunSample> rawSamples = new ArrayList<>();
@@ -133,7 +146,7 @@ public final class WebServerComparisonBenchmark {
         BenchServer server = createServer(serverName);
         System.out.printf(Locale.ROOT, "Starting %s in isolated JVM...%n", server.name());
         server.start();
-        String url = "http://127.0.0.1:" + server.port() + "/hello";
+        String url = "http://127.0.0.1:" + server.port() + server.benchmarkPath();
         try {
             runLoad(url, WARMUP_REQUESTS, CONCURRENCY);
             return runLoad(url, BENCHMARK_REQUESTS, CONCURRENCY).withServer(server.name());
@@ -152,6 +165,10 @@ public final class WebServerComparisonBenchmark {
                 new TomcatAdapter();
             case "Netty" ->
                 new NettyAdapter();
+            case "HelidonNima" ->
+                new HelidonNimaAdapter();
+            case "AvajeNima" ->
+                new AvajeNimaAdapter();
             default ->
                 throw new IllegalArgumentException("Unknown server: " + serverName);
         };
@@ -296,6 +313,7 @@ public final class WebServerComparisonBenchmark {
         markdown.append("- Benchmark requests: `").append(BENCHMARK_REQUESTS).append("`\n");
         markdown.append("- Concurrency: `").append(CONCURRENCY).append("`\n");
         markdown.append("- Rounds: `").append(ROUNDS).append("`\n");
+        markdown.append("- Peak tune mode: `").append(PEAK_TUNE ? "enabled" : "disabled").append("`\n");
         markdown.append("- Execution: `isolated JVM per server`\n");
         markdown.append("- Timestamp: `").append(Instant.now()).append("`\n\n");
 
@@ -341,6 +359,7 @@ public final class WebServerComparisonBenchmark {
                 .append("  \"benchmarkRequests\": ").append(BENCHMARK_REQUESTS).append(",\n")
                 .append("  \"concurrency\": ").append(CONCURRENCY).append(",\n")
                 .append("  \"rounds\": ").append(ROUNDS).append(",\n")
+                .append("  \"peakTune\": ").append(PEAK_TUNE).append(",\n")
                 .append("  \"executionModel\": \"isolated-jvm\",\n")
                 .append("  \"aggregate\": [\n");
         for (int i = 0; i < results.size(); i++) {
@@ -481,6 +500,19 @@ public final class WebServerComparisonBenchmark {
         }
     }
 
+    private static boolean envBool(String key, boolean defaultValue) {
+        String raw = System.getenv(key);
+        if (raw == null || raw.isBlank()) {
+            return defaultValue;
+        }
+        return "1".equals(raw) || "true".equalsIgnoreCase(raw) || "yes".equalsIgnoreCase(raw);
+    }
+
+    private static int tunedThreads(int minimum) {
+        int peak = Math.max(AVAILABLE_CPUS * 2, CONCURRENCY);
+        return Math.max(minimum, peak);
+    }
+
     private interface BenchServer extends AutoCloseable {
 
         String name();
@@ -488,6 +520,10 @@ public final class WebServerComparisonBenchmark {
         void start() throws Exception;
 
         int port();
+
+        default String benchmarkPath() {
+            return "/hello";
+        }
 
         @Override
         void close() throws Exception;
@@ -504,7 +540,7 @@ public final class WebServerComparisonBenchmark {
 
         @Override
         public void start() throws Exception {
-            int workerThreads = Math.max(8, CONCURRENCY);
+            int workerThreads = PEAK_TUNE ? tunedThreads(12) : Math.max(8, CONCURRENCY);
             server = new FastJavaNioServer(0, RequestLimits.defaults(64 * 1024), workerThreads);
             server.addStaticPlainTextRoute("/hello", "ok");
             server.addServlet("/hello", new HttpServlet() {
@@ -543,8 +579,10 @@ public final class WebServerComparisonBenchmark {
 
         @Override
         public void start() {
-            server = Undertow.builder()
+            Undertow.Builder builder = Undertow.builder()
                     .addHttpListener(0, "127.0.0.1")
+                    .setServerOption(UndertowOptions.ALWAYS_SET_KEEP_ALIVE, false)
+                    .setServerOption(UndertowOptions.RECORD_REQUEST_START_TIME, false)
                     .setHandler(exchange -> {
                         if ("/hello".equals(exchange.getRequestPath())) {
                             exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "text/plain");
@@ -553,8 +591,12 @@ public final class WebServerComparisonBenchmark {
                             exchange.setStatusCode(404);
                             exchange.endExchange();
                         }
-                    })
-                    .build();
+                    });
+            if (PEAK_TUNE) {
+                builder.setIoThreads(Math.max(2, AVAILABLE_CPUS));
+                builder.setWorkerThreads(tunedThreads(16));
+            }
+            server = builder.build();
             server.start();
             port = ((InetSocketAddress) server.getListenerInfo().get(0).getAddress()).getPort();
         }
@@ -590,6 +632,13 @@ public final class WebServerComparisonBenchmark {
             tomcat.setBaseDir(baseDir.toString());
             Connector connector = new Connector();
             connector.setPort(0);
+            if (PEAK_TUNE) {
+                connector.setProperty("maxThreads", String.valueOf(tunedThreads(64)));
+                connector.setProperty("minSpareThreads", "16");
+                connector.setProperty("acceptCount", "1000");
+                connector.setProperty("tcpNoDelay", "true");
+                connector.setProperty("connectionTimeout", "30000");
+            }
             tomcat.setConnector(connector);
 
             Context context = tomcat.addContext("", baseDir.toString());
@@ -649,12 +698,20 @@ public final class WebServerComparisonBenchmark {
         @Override
         public void start() throws Exception {
             bossGroup = new NioEventLoopGroup(1);
-            workerGroup = new NioEventLoopGroup();
+            workerGroup = PEAK_TUNE
+                    ? new NioEventLoopGroup(Math.max(2, AVAILABLE_CPUS))
+                    : new NioEventLoopGroup();
 
             ServerBootstrap bootstrap = new ServerBootstrap();
             bootstrap.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
+                    .option(ChannelOption.SO_BACKLOG, PEAK_TUNE ? 1024 : 128)
+                    .option(ChannelOption.SO_REUSEADDR, true)
                     .childOption(ChannelOption.TCP_NODELAY, true)
+                    .childOption(ChannelOption.SO_KEEPALIVE, PEAK_TUNE)
+                    .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK,
+                            PEAK_TUNE ? new WriteBufferWaterMark(64 * 1024, 256 * 1024)
+                                    : WriteBufferWaterMark.DEFAULT)
                     .childHandler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         protected void initChannel(SocketChannel ch) {
@@ -706,6 +763,92 @@ public final class WebServerComparisonBenchmark {
             }
             if (bossGroup != null) {
                 bossGroup.shutdownGracefully().sync();
+            }
+        }
+    }
+
+    private static final class HelidonNimaAdapter implements BenchServer {
+
+        private WebServer server;
+        private int port;
+
+        @Override
+        public String name() {
+            return "HelidonNima";
+        }
+
+        @Override
+        public void start() {
+            var builder = WebServer.builder()
+                    .host("127.0.0.1")
+                    .port(0)
+                    .routing(rules -> rules.get("/hello", (req, res) -> res.send("ok")));
+            if (PEAK_TUNE) {
+                // Tuned for concurrency: scale by 2-4x instead of 4-16x
+                int maxConcurrent = Math.max(512, CONCURRENCY * 8);    // More reasonable scaling
+                int maxTcpConn = Math.max(4096, CONCURRENCY * 32);     // More reasonable scaling
+                builder.maxConcurrentRequests(maxConcurrent);
+                builder.maxTcpConnections(maxTcpConn);
+            }
+            server = builder.build();
+            server.start();
+            port = server.port();
+        }
+
+        @Override
+        public int port() {
+            return port;
+        }
+
+        @Override
+        public void close() {
+            if (server != null) {
+                server.stop();
+            }
+        }
+    }
+
+    private static final class AvajeNimaAdapter implements BenchServer {
+
+        private Nima nima;
+        private int port;
+
+        @Override
+        public String name() {
+            return "AvajeNima";
+        }
+
+        @Override
+        public void start() {
+            Nima.Builder builder = Nima.builder()
+                    .port(0)
+                    .health(true);
+            if (PEAK_TUNE) {
+                // Tuned for concurrency: scale by 2-4x instead of 4-16x
+                int maxConcurrent = Math.max(512, CONCURRENCY * 8);    // More reasonable scaling
+                int maxTcpConn = Math.max(4096, CONCURRENCY * 32);     // More reasonable scaling
+                builder.maxConcurrentRequests(maxConcurrent);
+                builder.maxTcpConnections(maxTcpConn);
+            }
+            nima = builder.build();
+            nima.start();
+            port = nima.server().port();
+        }
+
+        @Override
+        public int port() {
+            return port;
+        }
+
+        @Override
+        public String benchmarkPath() {
+            return "/health";  // Built-in health endpoint; note: /hello would be slower (tested 404 vs 200)
+        }
+
+        @Override
+        public void close() {
+            if (nima != null && nima.server() != null) {
+                nima.server().stop();
             }
         }
     }

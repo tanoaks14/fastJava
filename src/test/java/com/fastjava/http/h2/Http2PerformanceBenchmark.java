@@ -1,13 +1,12 @@
 package com.fastjava.http.h2;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * HTTP/2 Performance Benchmarks - baseline for SIMD optimization analysis.
- * Run with: mvn test -Dtest=Http2PerformanceBenchmark
+ * HTTP/2 Performance Benchmarks - baseline for SIMD optimization analysis. Run
+ * with: mvn test -Dtest=Http2PerformanceBenchmark
  */
 public class Http2PerformanceBenchmark {
 

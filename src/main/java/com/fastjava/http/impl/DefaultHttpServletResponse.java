@@ -264,18 +264,6 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
         return line;
     }
 
-    private static ByteBuffer[] toByteBuffers(byte[][] segments) {
-        if (segments == null || segments.length == 0) {
-            return new ByteBuffer[0];
-        }
-        ByteBuffer[] buffers = new ByteBuffer[segments.length];
-        for (int i = 0; i < segments.length; i++) {
-            byte[] segment = segments[i];
-            buffers[i] = segment == null ? null : ByteBuffer.wrap(segment);
-        }
-        return buffers;
-    }
-
     @Override
     public void setChunkedResponseEnabled(boolean enabled) {
         if (enabled && fileBodyPath != null) {
@@ -438,9 +426,6 @@ public class DefaultHttpServletResponse implements HttpServletResponse {
             super(size);
         }
 
-        private byte[] rawBuffer() {
-            return buf;
-        }
     }
 
 }
