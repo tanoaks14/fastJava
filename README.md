@@ -120,10 +120,6 @@ graph TD
     C16 --> C17 --> C19
     C19 -->|Back to| C3
 
-    %% LOGIC SYNERGY
-    W9[[W9 Focused Benchmark Shape\nSmall GET amplifies parsing, dispatch, allocation, and write-path optimizations]]
-    class W9 logicPoint;
-    W9 -.explains result.-> C11
 ```
 
 ## Quick Start
