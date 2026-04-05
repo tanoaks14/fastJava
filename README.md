@@ -51,6 +51,81 @@ Latest raw output files:
 - `benchmarks/webserver-comparison/results/latest-results.md`
 - `benchmarks/webserver-comparison/results/latest-results.json`
 
+## Why FastJava Is Fast (Simple GET Flow)
+
+```mermaid
+graph TD
+    %% Global Styles
+    classDef memory fill:#e0f2f1,stroke:#00695c,color:#004d40,stroke-dasharray: 5 5;
+    classDef ioThread fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1;
+    classDef workerThread fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
+    classDef logicPoint fill:#ffffff,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;
+    classDef fastPath stroke:#ff6f00,stroke-width:4px;
+
+    %% 1. MEMORY MANAGEMENT (The 'Hidden' layer)
+    subgraph RAM [ThreadLocal Heap / Direct Memory]
+        M1[(Reusable Read Buffer)]:::memory
+        M2[(Reusable Response Object)]:::memory
+        M3[(Reusable Response Buffer)]:::memory
+    end
+
+    %% 2. SELECTOR LOOP
+    subgraph IO [Selector Thread]
+        C3[Connection State]:::ioThread --- W1([W1 Per-Conn State\nLock-Minimized by single-owner selector model]):::logicPoint
+
+        C4[handleRead]:::ioThread -->|Read bytes| M1
+
+        M1 --> C6[SIMD Parser]:::ioThread
+        C6 --- W2([W2 Vector Scan\nFast delimiter and prefix checks]):::logicPoint
+
+        C6 --> C7[Servlet Router]:::ioThread
+
+        C7 --> C11{Policy?}:::ioThread
+
+        C11 -->|Inline| C13[Direct Execution]:::fastPath
+        C13 --- W6([W6 Selector-local fast path\nNo worker handoff]):::logicPoint
+    end
+
+    %% 3. THE WORKER BRIDGE
+    subgraph Bridge [Concurrent Completion Queue]
+        W5([W5 Low-latency completion handoff\nConcurrent queue]):::logicPoint
+    end
+
+    %% 4. WORKER POOL
+    subgraph Worker [Worker Thread Pool]
+        C12[App Logic]:::workerThread -->|Populate| M2
+        M2 --- W3([W3 Response reuse and pooling\nLower GC pressure]):::logicPoint
+
+        C12 --> C10[HttpExecutionResult]:::workerThread
+    end
+
+    %% 5. THE WRITE-BACK PIPELINE
+    subgraph Egress [Egress Pipeline]
+        C16[Ordered Response Drain]:::ioThread
+        C16 --- W7([W7 Ordered pipelining\nCorrect keep-alive response order]):::logicPoint
+
+        C17[prepareWrite]:::ioThread --> M3
+        M3 --- W4([W4 Buffer reuse\nReduced allocation churn]):::logicPoint
+
+        C19[Gathering Write]:::ioThread
+        C19 --- W8([W8 Gather writes and transferTo file path\nFewer syscalls and copies]):::logicPoint
+    end
+
+    %% FLOW CONNECTIONS
+    C11 -->|Complex| Bridge
+    Bridge --> C12
+    C12 --> C10
+    C10 --> C16
+    C13 --> C16
+    C16 --> C17 --> C19
+    C19 -->|Back to| C3
+
+    %% LOGIC SYNERGY
+    W9[[W9 Focused Benchmark Shape\nSmall GET amplifies parsing, dispatch, allocation, and write-path optimizations]]
+    class W9 logicPoint;
+    W9 -.explains result.-> C11
+```
+
 ## Quick Start
 
 ### Prerequisites
