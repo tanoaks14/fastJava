@@ -192,7 +192,7 @@ public class GzipFilter implements Filter {
         String bare = (semicolon < 0 ? contentType : contentType.substring(0, semicolon)).trim()
                 .toLowerCase(Locale.ROOT);
         for (String prefix : EXCLUDED_MIME_PREFIXES) {
-            if (bare.startsWith(prefix) || bare.equals(prefix)) {
+            if (bare.startsWith(prefix)) {
                 return true;
             }
         }
