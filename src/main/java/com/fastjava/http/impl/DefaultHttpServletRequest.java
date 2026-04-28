@@ -600,10 +600,10 @@ public class DefaultHttpServletRequest implements HttpServletRequest {
         if (name == null) {
             return null;
         }
-        if (name == attributeKey1 || name.equals(attributeKey1)) {
+        if (name.equals(attributeKey1)) {
             return attributeValue1;
         }
-        if (name == attributeKey2 || name.equals(attributeKey2)) {
+        if (name.equals(attributeKey2)) {
             return attributeValue2;
         }
         return attributes == null ? null : attributes.get(name);

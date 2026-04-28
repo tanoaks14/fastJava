@@ -533,7 +533,7 @@ public final class MultipartStreamingParser implements Closeable {
 
         private void initializeBodyStream() throws IOException {
             boolean isFile = submittedFileName != null && !submittedFileName.isBlank();
-            long maxPartBytes = isFile ? limits.maxMultipartPartBytes() : limits.maxMultipartPartBytes();
+            long maxPartBytes = limits.maxMultipartPartBytes();
 
             Path spill = null;
             OutputStream tempOutput = null;
